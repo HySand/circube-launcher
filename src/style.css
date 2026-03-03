@@ -9,6 +9,9 @@
         --border: 214.3 31.8% 91.4%;
         --primary: 222 47% 11%;
         --primary-foreground: 210 40% 98%;
+        font-family: "SF Pro Display", "PingFang SC", sans-serif;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
     }
 
     .dark {
@@ -17,5 +20,34 @@
         --border: 217.2 32.6% 17.5%;
         --primary: 210 40% 98%;
         --primary-foreground: 222 47% 11%;
+        font-family: "SF Pro Display", "PingFang SC", sans-serif;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
     }
+}
+
+/* 1. 西文字体：SF Pro Display */
+@font-face {
+    font-family: 'SF Pro Display';
+    src: url('assets/fonts/SF-Pro-Display-Regular.otf') format('opentype');
+    font-weight: 400;
+    /* 仅匹配 ASCII 字符（数字、字母、常用符号） */
+    unicode-range: U+0000-007F;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: 'SF Pro Display';
+    src: url('assets/fonts/SF-Pro-Display-Bold.otf') format('opentype');
+    font-weight: 700;
+    unicode-range: U+0000-007F;
+    font-display: swap;
+}
+
+/* 2. 中文字体：PingFang SC */
+@font-face {
+    font-family: 'PingFang SC';
+    src: url('./assets/fonts/PingFangSC-Regular.woff2') format('woff2');
+    font-weight: 400;
+    font-display: swap;
 }

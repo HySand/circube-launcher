@@ -59,7 +59,7 @@
     </div>
 
     <div class="mt-6 flex justify-between items-center px-2">
-      <span class="text-[8px] text-slate-300 font-bold uppercase tracking-[0.2em]">Circube Core v1.0</span>
+      <span class="text-[8px] text-slate-300 font-bold uppercase tracking-[0.2em]">MADE BY ZEPHYR</span>
       <button @click="router.push('/main')" class="text-[9px] font-black text-slate-400 hover:text-blue-500 transition-colors uppercase tracking-tight">
         Skip →
       </button>

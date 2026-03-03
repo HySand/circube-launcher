@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use dirs_next::data_dir;
 use std::process::Command;
 use sysinfo::System;
+use regex::Regex;
+
 
 // -------------------- 数据结构 --------------------
 
@@ -220,6 +222,44 @@ fn get_used_memory() -> u64 {
     sys.used_memory() / 1024 / 1024
 }
 
+fn parse_java_display_name(full_output: &str) -> String {
+    // 1. 定义更宽泛的正则，匹配 version 后跟引号或数字
+    let version_regex = Regex::new(r#"(?i)version\s+"?([\d\._]+)"?"#).unwrap();
+    let fallback_regex = Regex::new(r#"(?i)build\s+"?([\d\._]+)"?"#).unwrap(); // 某些 JDK 只报 build
+
+    // 2. 在全文中搜索，而不仅仅是第一行
+    let mut version_num = if let Some(cap) = version_regex.captures(full_output) {
+        cap.get(1).map_or("??".to_string(), |m| m.as_str().to_string())
+    } else if let Some(cap) = fallback_regex.captures(full_output) {
+        cap.get(1).map_or("??".to_string(), |m| m.as_str().to_string())
+    } else {
+        // 最后的手段：找第一个看起来像版本号的数字序列
+        Regex::new(r#"(\d+\.\d+[\d\._]*)"#).unwrap()
+            .captures(full_output)
+            .and_then(|cap| cap.get(1))
+            .map_or("??".to_string(), |m| m.as_str().to_string())
+    };
+
+    // 3. 逻辑处理：1.8 -> 8, 21.0.6 -> 21
+    if version_num.starts_with("1.8") {
+        version_num = "8".to_string();
+    } else {
+        version_num = version_num.split('.').next().unwrap_or(&version_num).to_string();
+    }
+
+    // 4. 提取厂商 (全文扫描)
+    let content_upper = full_output.to_uppercase();
+    let vendor = if content_upper.contains("ZULU") { "Zulu" }
+        else if content_upper.contains("GRAALVM") { "GraalVM" }
+        else if content_upper.contains("MICROSOFT") { "Microsoft" }
+        else if content_upper.contains("CORRETTO") { "Corretto" }
+        else if content_upper.contains("TEMURIN") || content_upper.contains("ADOPTIUM") { "Temurin" }
+        else if content_upper.contains("ORACLE") { "Oracle" }
+        else { "OpenJDK" };
+
+    format!("{} {}", vendor, version_num)
+}
+
 #[tauri::command]
 fn scan_java_environments() -> Vec<JavaInfo> {
     println!("开始扫描 Java 环境...");
@@ -254,27 +294,24 @@ fn scan_java_environments() -> Vec<JavaInfo> {
     println!("找到 Java 路径: {:?}", paths);
 
     let mut result = Vec::new();
+        for path in paths {
+            let output = Command::new(&path).arg("-version").output();
+            if let Ok(out) = output {
+                let full_text = format!(
+                    "{}\n{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
 
-    for path in paths {
-        println!("检测路径: {}", path);
-        let version_output = Command::new(&path).arg("-version").output();
-        let version_str = match version_output {
-            Ok(out) => {
-                let s = String::from_utf8_lossy(&out.stderr);
-                let first_line = s.lines().next().unwrap_or("Unknown").to_string();
-                println!("{} 版本信息: {}", path, first_line);
-                first_line
-            }
-            Err(e) => {
-                println!("{} 获取版本失败: {:?}", path, e);
-                "Unknown".to_string()
-            }
-        };
-        result.push(JavaInfo { path, version: version_str });
-    }
+                let display_name = parse_java_display_name(&full_text);
 
-    println!("扫描完成，结果: {:?}", result);
-    result
+                result.push(JavaInfo {
+                    path,
+                    version: display_name,
+                });
+            }
+        }
+        result
 }
 
 #[tauri::command]

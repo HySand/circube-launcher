@@ -3,7 +3,7 @@
       class="w-screen h-screen overflow-hidden rounded-2xl border shadow-2xl relative flex flex-col
              bg-background text-foreground border-border">
     <TitleBar/>
-    <Toaster richColors position="top-center"/>
+    <Toaster richColors position="top-center" :duration="1500"/>
     <div class="flex-1 pt-10 overflow-y-auto">
       <router-view />
     </div>
