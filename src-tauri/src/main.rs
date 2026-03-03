@@ -1,14 +1,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
-use std::fs;
-use std::path::PathBuf;
-use dirs_next::data_dir;
-use std::process::Command;
-use sysinfo::System;
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use regex::Regex;
-
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
+use std::fs;
+use std::path::{PathBuf};
+use std::process::Command;
+use std::sync::Mutex;
+use sysinfo::System;
 
 // -------------------- 数据结构 --------------------
 
@@ -20,27 +22,28 @@ struct AuthPayload {
 
 #[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct Config {
-    java_path: String,
-    max_memory: u64,
+pub struct Config {
+    pub java_path: String,
+    pub max_memory: u64,
 }
 
 impl Config {
     fn file_path() -> PathBuf {
-        let mut path = data_dir().unwrap_or_else(|| std::env::current_dir().unwrap());
+        let mut path = dirs_next::data_dir().unwrap_or_else(|| std::env::current_dir().unwrap());
         path.push("circube-launcher");
-        fs::create_dir_all(&path).ok();
+        let _ = fs::create_dir_all(&path);
         path.push("config.json");
         path
     }
 
     fn load() -> Self {
-        if let Ok(data) = fs::read_to_string(Self::file_path()) {
-            if let Ok(cfg) = serde_json::from_str(&data) {
-                return cfg;
-            }
-        }
-        Config { java_path: "".into(), max_memory: 4096 }
+        fs::read_to_string(Self::file_path())
+            .ok()
+            .and_then(|data| serde_json::from_str(&data).ok())
+            .unwrap_or(Config {
+                java_path: "".into(),
+                max_memory: 4096,
+            })
     }
 
     fn save(&self) -> std::io::Result<()> {
@@ -56,7 +59,14 @@ struct UserInfo {
     uuid: String,
     access_token: String,
     skin_url: String,
+    #[allow(dead_code)]
     auth_type: String,
+}
+
+#[derive(Serialize)]
+struct JavaInfo {
+    path: String,
+    version: String,
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
@@ -65,29 +75,20 @@ struct AuthState {
     users: Vec<UserInfo>,
 }
 
-#[derive(Serialize, Debug)]
-struct JavaInfo {
-    path: String,
-    version: String,
-}
-
-
 impl AuthState {
     fn file_path() -> PathBuf {
-        let mut path = data_dir().unwrap_or_else(|| std::env::current_dir().unwrap());
+        let mut path = dirs_next::data_dir().unwrap_or_else(|| std::env::current_dir().unwrap());
         path.push("circube-launcher");
-        fs::create_dir_all(&path).ok();
+        let _ = fs::create_dir_all(&path);
         path.push("auth_state.json");
         path
     }
 
     fn load() -> Self {
-        if let Ok(data) = fs::read_to_string(Self::file_path()) {
-            if let Ok(state) = serde_json::from_str(&data) {
-                return state;
-            }
-        }
-        AuthState::default()
+        fs::read_to_string(Self::file_path())
+            .ok()
+            .and_then(|data| serde_json::from_str(&data).ok())
+            .unwrap_or_default()
     }
 
     fn save(&self) -> std::io::Result<()> {
@@ -96,116 +97,273 @@ impl AuthState {
     }
 }
 
-// -------------------- Tauri 命令 --------------------
+// --- Minecraft Version JSON Parser ---
 
-#[tauri::command]
-async fn ms_login_command() -> Result<String, String> {
-    println!("调用微软 OAuth (模拟)...");
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    Ok("SUCCESS_MS_AUTH_MOCK".into())
+#[derive(Deserialize)]
+struct VersionConfig {
+    arguments: Arguments,
+    #[serde(rename = "mainClass")]
+    main_class: String,
+    libraries: Vec<Library>,
 }
 
-use base64::{Engine};
-use base64::engine::general_purpose::STANDARD;
-use serde_json::Value;
+#[derive(Deserialize)]
+struct Library {
+    downloads: LibraryDownloads,
+}
+
+#[derive(Deserialize)]
+struct LibraryDownloads {
+    artifact: Artifact,
+}
+
+#[derive(Deserialize)]
+struct Artifact {
+    path: String,
+}
+
+#[derive(Deserialize)]
+struct Arguments {
+    game: Vec<Argument>,
+    jvm: Vec<Argument>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Argument {
+    Simple(String),
+    Conditional {
+        rules: Vec<Rule>,
+        value: ArgumentValue,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ArgumentValue {
+    Single(String),
+    Many(Vec<String>),
+}
+
+#[derive(Deserialize)]
+struct Rule {
+    action: String,
+    os: Option<OSRule>,
+}
+
+#[derive(Deserialize)]
+struct OSRule {
+    name: Option<String>,
+    #[allow(dead_code)] // 暂不处理架构差异
+    arch: Option<String>,
+}
+
+// -------------------- 解析引擎逻辑 --------------------
+
+impl Argument {
+    fn resolve(&self, env: &HashMap<&str, String>) -> Vec<String> {
+        match self {
+            Argument::Simple(s) => vec![Self::replace_vars(s, env)],
+            Argument::Conditional { rules, value } => {
+                if Self::evaluate_rules(rules) {
+                    match value {
+                        ArgumentValue::Single(s) => vec![Self::replace_vars(s, env)],
+                        ArgumentValue::Many(v) => v.iter().map(|s| Self::replace_vars(s, env)).collect(),
+                    }
+                } else {
+                    vec![]
+                }
+            }
+        }
+    }
+
+    fn evaluate_rules(rules: &[Rule]) -> bool {
+        for rule in rules {
+            let mut matched = true;
+            if let Some(ref os_rule) = rule.os {
+                let current_os = if cfg!(target_os = "windows") { "windows" }
+                                 else if cfg!(target_os = "macos") { "osx" }
+                                 else { "linux" };
+                if let Some(ref name) = os_rule.name {
+                    if name != current_os { matched = false; }
+                }
+            }
+            if (rule.action == "allow" && !matched) || (rule.action == "disallow" && matched) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn replace_vars(template: &str, env: &HashMap<&str, String>) -> String {
+        let mut result = template.to_string();
+        for (key, val) in env {
+            result = result.replace(key, val);
+        }
+        result
+    }
+}
+
+// -------------------- Tauri 命令 --------------------
 
 #[tauri::command]
 async fn yggdrasil_login(
     payload: AuthPayload,
-    state: tauri::State<'_, Mutex<AuthState>>
+    state: tauri::State<'_, Mutex<AuthState>>,
 ) -> Result<UserInfo, String> {
     let client = reqwest::Client::new();
     let auth_url = "https://littleskin.cn/api/yggdrasil/authserver/authenticate";
 
-    // 更新后的 texture_url
-    let texture_url = |uuid: &str| format!("https://littleskin.cn/api/yggdrasil/sessionserver/session/minecraft/profile/{}", uuid);
-
-    // 构建认证请求体
-    let body = serde_json::json!( {
+    let body = serde_json::json!({
         "agent": { "name": "Minecraft", "version": 1 },
         "username": payload.email,
         "password": payload.password,
         "requestUser": true
     });
 
-    // 发送认证请求
     let response = client.post(auth_url).json(&body).send().await
-        .map_err(|e| format!("网络请求失败: {}", e))?;
+        .map_err(|e| format!("Network error: {}", e))?;
 
     if response.status().is_success() {
-        let auth_data: serde_json::Value = response.json().await
-            .map_err(|e| format!("解析失败: {}", e))?;
+        let auth_data: Value = response.json().await.map_err(|e| e.to_string())?;
+        let profile = auth_data["availableProfiles"][0].clone();
+        let profile_id = profile["id"].as_str().ok_or("Invalid profile")?;
 
-        // 获取用户角色信息
-        let profile = auth_data["availableProfiles"]
-            .as_array()
-            .and_then(|arr| arr.get(0))
-            .ok_or("没有可用角色")?;
+        let texture_url = format!("https://littleskin.cn/api/yggdrasil/sessionserver/session/minecraft/profile/{}", profile_id);
+        let texture_data: Value = client.get(&texture_url).send().await
+            .map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
 
-        // 获取皮肤数据，构造新的 texture_url
-        let profile_id = profile["id"].as_str().unwrap_or_default();
-        let texture_url = texture_url(profile_id);
+        let texture_base64 = texture_data["properties"][0]["value"].as_str().unwrap_or("");
+        let decoded = STANDARD.decode(texture_base64).unwrap_or_default();
+        let decoded_json: Value = serde_json::from_slice(&decoded).unwrap_or(serde_json::json!({}));
+        let skin_url = decoded_json["textures"]["SKIN"]["url"].as_str().unwrap_or("").to_string();
 
-        // 获取皮肤数据
-        let texture_response = client
-            .get(&texture_url) // 使用 GET 请求来获取皮肤数据
-            .send().await
-            .map_err(|e| format!("获取皮肤失败: {}", e))?;
-
-        let texture_data: Value = texture_response.json().await
-            .map_err(|e| format!("解析皮肤数据失败: {}", e))?;
-
-        // 解码 base64 字符串
-        let texture_base64 = texture_data["properties"][0]["value"]
-            .as_str()
-            .ok_or("没有找到纹理数据")?;
-
-        let decoded = STANDARD.decode(texture_base64)
-            .map_err(|e| format!("解码失败: {}", e))?;
-
-        // 解析 JSON 数据
-        let decoded_json: Value = serde_json::from_slice(&decoded)
-            .map_err(|e| format!("解析纹理 JSON 失败: {}", e))?;
-
-        // 提取皮肤 URL
-        let skin_url = decoded_json["textures"]["SKIN"]["url"]
-            .as_str()
-            .ok_or("没有找到皮肤 URL")?;
-
-        // 构造用户信息
         let user = UserInfo {
-            name: profile["name"].as_str().unwrap_or_default().into(),
+            name: profile["name"].as_str().unwrap_or("Player").into(),
             uuid: profile_id.into(),
-            access_token: auth_data["accessToken"].as_str().unwrap_or_default().into(),
-            skin_url: skin_url.into(), // 使用正确的皮肤 URL
+            access_token: auth_data["accessToken"].as_str().unwrap_or("").into(),
+            skin_url,
             auth_type: "Yggdrasil".into(),
         };
 
-        // 更新认证状态
         let mut auth_state = state.lock().unwrap();
-        if let Some(existing) = auth_state.users.iter_mut().find(|u| u.uuid == user.uuid) {
-            *existing = user.clone();
-        } else {
-            auth_state.users.push(user.clone());
-        }
+        auth_state.users.retain(|u| u.uuid != user.uuid);
+        auth_state.users.push(user.clone());
         auth_state.current_user_id = Some(user.uuid.clone());
-        auth_state.save().map_err(|e| format!("保存失败: {}", e))?;
+        let _ = auth_state.save();
 
-        println!("用户登录成功: {} ({})", user.name, user.uuid);
         Ok(user)
     } else {
-        Err("账号或密码错误".into())
+        Err("Authentication failed".into())
     }
 }
 
 #[tauri::command]
-fn get_current_user(state: tauri::State<'_, Mutex<AuthState>>) -> Option<UserInfo> {
-    let auth_state = state.lock().unwrap();
-    if let Some(uuid) = &auth_state.current_user_id {
-        auth_state.users.iter().find(|u| &u.uuid == uuid).cloned()
-    } else {
-        None
+fn save_config(config: Config, state: tauri::State<'_, Mutex<Config>>) -> Result<(), String> {
+    let mut current_config = state.lock().unwrap();
+    *current_config = config;
+    current_config.save().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn launch_minecraft(
+    auth_state: tauri::State<'_, Mutex<AuthState>>,
+    config_state: tauri::State<'_, Mutex<Config>>,
+) -> Result<(), String> {
+    let auth = auth_state.lock().unwrap();
+    let config = config_state.lock().unwrap();
+
+    let user = auth.current_user_id.as_ref()
+        .and_then(|id| auth.users.iter().find(|u| &u.uuid == id))
+        .ok_or("User not logged in")?;
+
+    // 1. 路径初始化
+    let base_dir = std::env::current_exe().map_err(|e| e.to_string())?.parent().unwrap().to_path_buf();
+    let mc_dir = base_dir.join(".minecraft");
+    let version_json_path = mc_dir.join("versions/CirCube/CirCube.json");
+
+    let raw_json = fs::read_to_string(&version_json_path).map_err(|_| "Missing CirCube.json")?;
+    let ver_cfg: VersionConfig = serde_json::from_str(&raw_json).map_err(|e| e.to_string())?;
+
+    // 2. 精确构建 Classpath
+    // 不再使用递归扫描，而是解析 JSON 里的 libraries 数组
+    let mut cp_list = Vec::new();
+    let libs_base = mc_dir.join("libraries");
+
+    for lib in ver_cfg.libraries {
+        let lib_path = libs_base.join(&lib.downloads.artifact.path);
+        if lib_path.exists() {
+            cp_list.push(lib_path);
+        } else {
+            // 如果你发现启动不了，通常是库没下载全
+            println!("Warning: Library missing at {:?}", lib_path);
+        }
     }
+
+    // 加入版本核心 JAR
+    cp_list.push(mc_dir.join("versions/CirCube/CirCube.jar"));
+
+    let cp_sep = if cfg!(windows) { ";" } else { ":" };
+    let cp_str = cp_list.iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join(cp_sep);
+
+    // 3. 环境变量插值
+    let mut env = HashMap::new();
+    env.insert("${auth_player_name}", user.name.clone());
+    env.insert("${auth_uuid}", user.uuid.clone());
+    env.insert("${auth_access_token}", user.access_token.clone());
+    env.insert("${game_directory}", mc_dir.to_string_lossy().into());
+    env.insert("${assets_root}", mc_dir.join("assets").to_string_lossy().into());
+    env.insert("${assets_index_name}", "5".into());
+    env.insert("${version_name}", "CirCube".into());
+    env.insert("${version_type}", "CirCube Launcher".into());
+    env.insert("${user_type}", "msa".into());
+    env.insert("${natives_directory}", mc_dir.join("natives").to_string_lossy().into());
+    env.insert("${library_directory}", libs_base.to_string_lossy().into());
+    env.insert("${classpath_separator}", cp_sep.into());
+    env.insert("${classpath}", cp_str);
+
+    env.insert("${resolution_width}", "854".into());
+    env.insert("${resolution_height}", "480".into());
+    env.insert("${quickPlayPath}", "".into());
+    env.insert("${quickPlaySingleplayer}", "".into());
+    env.insert("${quickPlayMultiplayer}", "".into());
+    env.insert("${quickPlayRealms}", "".into());
+
+    // 4. 参数装配
+    let mut final_args = Vec::new();
+
+    // 注入内存
+    final_args.push(format!("-Xmx{}M", config.max_memory));
+
+    // JVM 参数 (处理了模块化路径、add-opens 等)
+    for arg in &ver_cfg.arguments.jvm {
+        final_args.extend(arg.resolve(&env));
+    }
+
+    // 主类
+    final_args.push(ver_cfg.main_class.clone());
+
+    // 游戏参数
+    for arg in &ver_cfg.arguments.game {
+        final_args.extend(arg.resolve(&env));
+    }
+
+    // 5. 执行启动
+    let java_exec = if config.java_path.is_empty() { "java" } else { &config.java_path };
+
+    // 打印调试信息（可选）
+    // println!("Executing: {} {:?}", java_exec, final_args);
+
+    Command::new(java_exec)
+        .args(&final_args)
+        .current_dir(&mc_dir) // 重要：设置工作目录为 .minecraft
+        .spawn()
+        .map_err(|e| format!("Launch failed: {}", e))?;
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -213,6 +371,21 @@ fn get_total_memory() -> u64 {
     let mut sys = System::new_all();
     sys.refresh_memory();
     sys.total_memory() / 1024 / 1024
+}
+
+#[tauri::command]
+fn get_config(s: tauri::State<'_, Mutex<Config>>) -> Config { s.lock().unwrap().clone() }
+
+#[tauri::command]
+fn get_current_user(s: tauri::State<'_, Mutex<AuthState>>) -> Option<UserInfo> {
+    let auth = s.lock().unwrap();
+    auth.current_user_id.as_ref().and_then(|id| auth.users.iter().find(|u| &u.uuid == id).cloned())
+}
+
+#[tauri::command]
+fn logout_current_user() -> bool {
+    fs::remove_file(AuthState::file_path()).ok();
+    true
 }
 
 #[tauri::command]
@@ -314,37 +487,22 @@ fn scan_java_environments() -> Vec<JavaInfo> {
         result
 }
 
-#[tauri::command]
-fn get_config() -> Config {
-    Config::load()
-}
-
-#[tauri::command]
-fn save_config(config: Config) -> bool {
-    config.save().is_ok()
-}
-
-#[tauri::command]
-fn logout_current_user() -> bool {
-    fs::remove_file(AuthState::file_path()).ok();
-    true
-}
-
-// -------------------- 启动 --------------------
+// -------------------- Main --------------------
 
 fn main() {
     tauri::Builder::default()
         .manage(Mutex::new(AuthState::load()))
+        .manage(Mutex::new(Config::load()))
         .invoke_handler(tauri::generate_handler![
-            ms_login_command,
             yggdrasil_login,
+            save_config,
+            get_config,
             get_total_memory,
             get_used_memory,
-            scan_java_environments,
             get_current_user,
-            get_config,
-            save_config,
-            logout_current_user
+            launch_minecraft,
+            logout_current_user,
+             scan_java_environments
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

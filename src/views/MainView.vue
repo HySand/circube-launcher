@@ -46,6 +46,7 @@ import {ref, onMounted, watch, nextTick} from "vue";
 import { useRouter } from "vue-router";
 import { useCacheStore } from '@/stores/cache';
 import * as skinview3d from 'skinview3d';
+import {invoke} from "@tauri-apps/api/core";
 
 const router = useRouter();
 const cache = useCacheStore();
@@ -77,8 +78,12 @@ watch(() => cache.quote, async (newQuote) => {
   await nextTick();
 });
 
-const handleLaunch = () => {
-  console.log("Launching Minecraft...");
+const handleLaunch = async () => {
+  try {
+    await invoke("launch_minecraft");
+  } catch (e) {
+    console.error(e);
+  }
 };
 
 const handleSettings = () => {

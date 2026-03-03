@@ -98,7 +98,7 @@ const loginWithYggdrasil = async () => {
   try {
     const res = await invoke('yggdrasil_login', { payload: { ...authForm } })
     console.log("LittleSkin 登录状态:", res)
-    await router.push('/main')
+    await router.push('/')
   } catch (err) {
     alert("登录错误: " + err)
   }
