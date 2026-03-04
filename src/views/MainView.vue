@@ -54,7 +54,7 @@ const cache = useCacheStore();
 const username = ref(cache.user?.name ?? "");
 const quote = ref(cache.quote);
 
-const skinUrl = ref(cache.user?.skinUrl ?? "https://minecraft.net/skins/steve.png");
+const skinUrl = ref(cache.user?.skinUrl ?? "https://textures.minecraft.net/texture/58806cf80200b93b3a3471ef0fc0326a4bb8daf69af7d2929764e4149988882e");
 
 const container = ref<HTMLElement | null>(null);
 let viewer: skinview3d.SkinViewer | null = null;

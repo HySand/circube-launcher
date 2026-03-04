@@ -154,7 +154,7 @@ struct Rule {
 #[derive(Deserialize)]
 struct OSRule {
     name: Option<String>,
-    #[allow(dead_code)] // 暂不处理架构差异
+    #[allow(dead_code)]
     arch: Option<String>,
 }
 
@@ -217,8 +217,7 @@ async fn yggdrasil_login(
     let body = serde_json::json!({
         "agent": { "name": "Minecraft", "version": 1 },
         "username": payload.email,
-        "password": payload.password,
-        "requestUser": true
+        "password": payload.password
     });
 
     let response = client.post(auth_url).json(&body).send().await
@@ -277,7 +276,6 @@ fn launch_minecraft(
         .and_then(|id| auth.users.iter().find(|u| &u.uuid == id))
         .ok_or("User not logged in")?;
 
-    // 1. 路径初始化
     let base_dir = std::env::current_exe().map_err(|e| e.to_string())?.parent().unwrap().to_path_buf();
     let mc_dir = base_dir.join(".minecraft");
     let version_json_path = mc_dir.join("versions/CirCube/CirCube.json");
@@ -285,46 +283,69 @@ fn launch_minecraft(
     let raw_json = fs::read_to_string(&version_json_path).map_err(|_| "Missing CirCube.json")?;
     let ver_cfg: VersionConfig = serde_json::from_str(&raw_json).map_err(|e| e.to_string())?;
 
-    // 2. 精确构建 Classpath
-    // 不再使用递归扫描，而是解析 JSON 里的 libraries 数组
-    let mut cp_list = Vec::new();
     let libs_base = mc_dir.join("libraries");
+    let cp_sep = if cfg!(windows) { ";" } else { ":" };
 
-    for lib in ver_cfg.libraries {
-        let lib_path = libs_base.join(&lib.downloads.artifact.path);
+    // --- 1. 构建 Classpath 和 Module Path ---
+    let mut cp_list = Vec::new();
+    let mut mp_list = Vec::new();
+
+    for lib in &ver_cfg.libraries {
+        let current_os = std::env::consts::OS;
+        let path_str = &lib.downloads.artifact.path;
+if current_os == "windows" {
+    if path_str.contains("linux") || path_str.contains("macos") {
+        continue;
+    }
+}
+
+if current_os == "linux" {
+    if path_str.contains("windows") || path_str.contains("macos") {
+        continue;
+    }
+}
+
+if current_os == "macos" {
+    if path_str.contains("windows") || path_str.contains("linux") {
+        continue;
+    }
+}
+
+        let lib_path = libs_base.join(path_str);
         if lib_path.exists() {
-            cp_list.push(lib_path);
-        } else {
-            // 如果你发现启动不了，通常是库没下载全
-            println!("Warning: Library missing at {:?}", lib_path);
+            let p_str = lib_path.to_string_lossy().to_string();
+            cp_list.push(p_str.clone());
+
+            // Forge 1.20.1 关键：特定库必须加入 Module Path (-p)
+            if path_str.contains("bootstraplauncher") ||
+               path_str.contains("securejarhandler") ||
+               path_str.contains("ow2/asm") ||
+               path_str.contains("JarJarFileSystems") {
+                mp_list.push(p_str);
+            }
         }
     }
 
-    // 加入版本核心 JAR
-    cp_list.push(mc_dir.join("versions/CirCube/CirCube.jar"));
 
-    let cp_sep = if cfg!(windows) { ";" } else { ":" };
-    let cp_str = cp_list.iter()
-        .map(|p| p.to_string_lossy().to_string())
-        .collect::<Vec<_>>()
-        .join(cp_sep);
-
-    // 3. 环境变量插值
+    // --- 2. 准备环境变量 ---
     let mut env = HashMap::new();
+    let cp_str = cp_list.join(cp_sep);
+
     env.insert("${auth_player_name}", user.name.clone());
     env.insert("${auth_uuid}", user.uuid.clone());
     env.insert("${auth_access_token}", user.access_token.clone());
-    env.insert("${game_directory}", mc_dir.to_string_lossy().into());
+    env.insert("${user_type}", "msa".into());
+    env.insert("${clientid}", "circube".into());
+    env.insert("${auth_xuid}", "0".into());
+    env.insert("${game_directory}", mc_dir.join("versions/CirCube").to_string_lossy().into());
     env.insert("${assets_root}", mc_dir.join("assets").to_string_lossy().into());
     env.insert("${assets_index_name}", "5".into());
     env.insert("${version_name}", "CirCube".into());
     env.insert("${version_type}", "CirCube Launcher".into());
-    env.insert("${user_type}", "msa".into());
     env.insert("${natives_directory}", mc_dir.join("natives").to_string_lossy().into());
     env.insert("${library_directory}", libs_base.to_string_lossy().into());
     env.insert("${classpath_separator}", cp_sep.into());
     env.insert("${classpath}", cp_str);
-
     env.insert("${resolution_width}", "854".into());
     env.insert("${resolution_height}", "480".into());
     env.insert("${quickPlayPath}", "".into());
@@ -332,34 +353,75 @@ fn launch_minecraft(
     env.insert("${quickPlayMultiplayer}", "".into());
     env.insert("${quickPlayRealms}", "".into());
 
-    // 4. 参数装配
+    // --- 3. 组装最终参数 ---
     let mut final_args = Vec::new();
 
-    // 注入内存
-    final_args.push(format!("-Xmx{}M", config.max_memory));
+    // A. 基础 JVM 参数
+    let mut final_max_memory = config.max_memory;
 
-    // JVM 参数 (处理了模块化路径、add-opens 等)
+        if final_max_memory == 0 {
+            // 执行自动调优逻辑 (同前端 performAutoTune)
+            let mut sys = System::new_all();
+            sys.refresh_memory();
+
+            let total_mb = sys.total_memory() / 1024 / 1024;
+            let used_mb = sys.used_memory() / 1024 / 1024;
+
+            // 逻辑：(总内存 - 已用内存 - 512MB 预留) * 0.75，并向下对齐到 512MB 的倍数
+            let available = total_mb.saturating_sub(used_mb).saturating_sub(512);
+            let recommendation = ((available as f64 * 0.75) / 512.0).floor() as u64 * 512;
+
+            // 最小保底 2048MB，防止系统过载时算出一个极小值
+            final_max_memory = std::cmp::max(2048, recommendation);
+
+            println!("[Launch] Auto-tuning memory: {}MB", final_max_memory);
+        }
+    final_args.push(format!("-Xms{}M", final_max_memory));
+    final_args.push(format!("-Xmx{}M", final_max_memory));
+    final_args.push("-Dfile.encoding=UTF-8".into());
+
+    // B. Authlib Injector
+    if user.auth_type.clone() == "Yggdrasil" {
+        let injector_path = mc_dir.join("authlib-injector.jar");
+            if injector_path.exists() {
+                final_args.push(format!("-javaagent:{}={}", injector_path.to_string_lossy(), "https://littleskin.cn/api/yggdrasil"));
+                final_args.push(format!("-Dauthlibinjector.yggdrasil.prefetched={}", "ewogICAgIm1ldGEiOiB7CiAgICAgICAgInNlcnZlck5hbWUiOiAiTGl0dGxlU2tpbiIsCiAgICAgICAgImltcGxlbWVudGF0aW9uTmFtZSI6ICJZZ2dkcmFzaWwgQ29ubmVjdCIsCiAgICAgICAgImltcGxlbWVudGF0aW9uVmVyc2lvbiI6ICIwLjAuOCIsCiAgICAgICAgImxpbmtzIjogewogICAgICAgICAgICAiYW5ub3VuY2VtZW50IjogImh0dHBzOi8vbGl0dGxlc2tpbi5jbi9hcGkvYW5ub3VuY2VtZW50cyIsCiAgICAgICAgICAgICJob21lcGFnZSI6ICJodHRwczovL2xpdHRsZXNraW4uY24iLAogICAgICAgICAgICAicmVnaXN0ZXIiOiAiaHR0cHM6Ly9saXR0bGVza2luLmNuL2F1dGgvcmVnaXN0ZXIiCiAgICAgICAgfSwKICAgICAgICAiZmVhdHVyZS5ub25fZW1haWxfbG9naW4iOiB0cnVlLAogICAgICAgICJmZWF0dXJlLmVuYWJsZV9wcm9maWxlX2tleSI6IHRydWUsCiAgICAgICAgImZlYXR1cmUub3BlbmlkX2NvbmZpZ3VyYXRpb25fdXJsIjogImh0dHBzOi8vb3Blbi5saXR0bGVza2luLmNuLy53ZWxsLWtub3duL29wZW5pZC1jb25maWd1cmF0aW9uIgogICAgfSwKICAgICJza2luRG9tYWlucyI6IFsKICAgICAgICAibGl0dGxlc2tpbi5jbiIKICAgIF0sCiAgICAic2lnbmF0dXJlUHVibGlja2V5IjogIi0tLS0tQkVHSU4gUFVCTElDIEtFWS0tLS0tXG5NSUlDSWpBTkJna3Foa2lHOXcwQkFRRUZBQU9DQWc4QU1JSUNDZ0tDQWdFQXJHY05PT0ZJcUxKU3FvRTN1MGhqXG50T0VuT2NFVDN3ajlEcnNzMUJFNnNCcWdQbzBiTXVsT1VMaHFqa2MvdUgvd3lvc1luenczeGFhekp0ODdqVEhoXG5KOEJQTXhDZVFNb3lFZFJvUzNKbmoxRzBLZXpqNEEyYjYxUEpKTTFEcHZEQWNxUUJZc3JTZHBCSis1Mk1qb0dTXG52Sm9lUU81WFVsSlZRbTIxL0htSm5xc1BoemNBNkhnWTcxUkhZRTV4bmhwV0ppUHhMS1VQdG10NkNOWVVRUW9TXG5vMnYzNlhXZ01tTEJaaEFiTk9QeFlYKzFpb3hLYW1qaExPMjlVaHd0Z1k5VTZQV0VPNy9TQmZYenlSUFR6aFBWXG4ybkhxN0tKcWQ4SUlybHRzbHY2aS80RkVNODFpdlMvbW0rUE4zaFlsSVlLNno2WW1paTFuclFBcGxzSjY3T0dxXG5ZSHRXS092cGZUek9vbGx1Z3NSaWhrQUc0T0I2aE0wUHI0NWpqQzNUSWM3ZU83a09nSWNHVUdVUUd1dXVnREV6XG5KMU45RkZXbk4vSDZQOXVrRmVnNVNtR0M1K3dtVVBaWkN0TkJMcjhvOHNJNUg3UWhLN05nd0NhR0ZvWXVpQUdMXG5nejNrLzNZd0o0MEJid1FheVEyZ0lxZW56K1hPRklBbGFqdisvbnlmY0R2Wkg5dkdOS1A5bFZjSFhVVDVZUm5TXG5aU0hvNWx3dlZyWVVycUVBYmgvekR6OFFNRXlpdWpXdlVrUGhaczlmaDZmaW1VR3h0bThtRklQQ3RQSlZYamVZXG53RDNMdnQzYUlCMUpIZFVUSlIzZUVjNGVJYVRLTXdNUHlKUnpWbjV6S3NpdGFaejNubi9jT0Evd1pDOW9xeUVVXG5tYzloNlpNUlRSVUVFNFR0YUp5ZzlsTUNBd0VBQVE9PVxuLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tXG4iCn0="));
+            }
+    }
+
+
+    // C. Forge 专属系统变量
+    final_args.push("-DignoreList=bootstraplauncher,securejarhandler,asm-commons,asm-util,asm-analysis,asm-tree,asm,JarJarFileSystems,client-extra,fmlcore,javafmllanguage,lowcodelanguage,mclanguage,forge-,CirCube.jar".into());
+    final_args.push(format!("-DlibraryDirectory={}", libs_base.to_string_lossy()));
+
+    // D. Module Path
+    if !mp_list.is_empty() {
+        final_args.push("-cp".into());
+        final_args.push(mp_list.join(cp_sep));
+    }
+
+    // E. 注入 Version JSON 中的 JVM 参数 (含 add-opens 等)
     for arg in &ver_cfg.arguments.jvm {
         final_args.extend(arg.resolve(&env));
     }
 
-    // 主类
+    // F. Main Class
     final_args.push(ver_cfg.main_class.clone());
 
-    // 游戏参数
     for arg in &ver_cfg.arguments.game {
         final_args.extend(arg.resolve(&env));
     }
+    final_args.retain(|arg| arg != "--demo");
 
     // 5. 执行启动
     let java_exec = if config.java_path.is_empty() { "java" } else { &config.java_path };
 
-    // 打印调试信息（可选）
-    // println!("Executing: {} {:?}", java_exec, final_args);
+    // 调试输出：检查是否还存在 ${...}
+    // println!("Args: {:?}", final_args);
 
     Command::new(java_exec)
         .args(&final_args)
-        .current_dir(&mc_dir) // 重要：设置工作目录为 .minecraft
+        .current_dir(&mc_dir)
         .spawn()
         .map_err(|e| format!("Launch failed: {}", e))?;
 
@@ -383,8 +445,18 @@ fn get_current_user(s: tauri::State<'_, Mutex<AuthState>>) -> Option<UserInfo> {
 }
 
 #[tauri::command]
-fn logout_current_user() -> bool {
-    fs::remove_file(AuthState::file_path()).ok();
+fn logout_current_user(state: tauri::State<'_, Mutex<AuthState>>) -> bool {
+    let mut auth = state.lock().unwrap();
+    auth.users.clear();
+    auth.current_user_id = None;
+
+    let path = AuthState::file_path();
+    if path.exists() {
+        if let Err(e) = fs::remove_file(&path) {
+            println!("Failed to remove auth_state.json: {:?}", e);
+            return false;
+        }
+    }
     true
 }
 
@@ -502,7 +574,7 @@ fn main() {
             get_current_user,
             launch_minecraft,
             logout_current_user,
-             scan_java_environments
+            scan_java_environments
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -195,7 +195,11 @@ const autoTuneMemory = async () => {
   }
 }
 
-const handleLogout = async () => { cache.clearUser(); router.push('/main') }
+const handleLogout = async () => {
+  cache.clearUser();
+  await invoke('logout_current_user')
+  await router.push('/')
+}
 
 onMounted(async () => {
   await nextTick()
