@@ -54,13 +54,32 @@ impl Config {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct UserInfo {
+pub struct UserInfo {
     name: String,
     uuid: String,
     access_token: String,
     skin_url: String,
     #[allow(dead_code)]
     auth_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Profile {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "status", content = "data")]
+pub enum AuthResponse {
+    #[serde(rename = "success")]
+    Success(UserInfo),
+    #[serde(rename = "need_selection")]
+    NeedSelection {
+        profiles: Vec<Profile>,
+        access_token: String,
+        client_token: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -204,57 +223,116 @@ impl Argument {
     }
 }
 
+
+async fn process_user_info(
+    client: &reqwest::Client,
+    access_token: &serde_json::Value,
+    profile_data: &serde_json::Value,
+) -> Result<UserInfo, String> {
+    let profile_id = profile_data["id"].as_str().ok_or("Invalid profile id")?;
+    let profile_name = profile_data["name"].as_str().unwrap_or("Player");
+
+    // 获取纹理数据
+    let texture_url = format!("https://littleskin.cn/api/yggdrasil/sessionserver/session/minecraft/profile/{}", profile_id);
+    let texture_res = client.get(&texture_url).send().await
+        .map_err(|e| e.to_string())?;
+
+    let texture_data: Value = texture_res.json().await.map_err(|e| e.to_string())?;
+
+    // 解析皮肤 URL (保持你原有的解密逻辑)
+    let mut skin_url = String::new();
+    if let Some(props) = texture_data["properties"].as_array() {
+        if let Some(val_str) = props[0]["value"].as_str() {
+            if let Ok(decoded) = STANDARD.decode(val_str) {
+                if let Ok(decoded_json) = serde_json::from_slice::<Value>(&decoded) {
+                    skin_url = decoded_json["textures"]["SKIN"]["url"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
+                }
+            }
+        }
+    }
+
+    Ok(UserInfo {
+        name: profile_name.to_string(),
+        uuid: profile_id.to_string(),
+        access_token: access_token.as_str().unwrap_or("").to_string(),
+        skin_url,
+        auth_type: "Yggdrasil".into(),
+    })
+}
 // -------------------- Tauri 命令 --------------------
 
 #[tauri::command]
 async fn yggdrasil_login(
     payload: AuthPayload,
     state: tauri::State<'_, Mutex<AuthState>>,
-) -> Result<UserInfo, String> {
+) -> Result<AuthResponse, String> {
     let client = reqwest::Client::new();
-    let auth_url = "https://littleskin.cn/api/yggdrasil/authserver/authenticate";
-
     let body = serde_json::json!({
         "agent": { "name": "Minecraft", "version": 1 },
         "username": payload.email,
-        "password": payload.password
+        "password": payload.password,
+        "requestUser": true
     });
 
-    let response = client.post(auth_url).json(&body).send().await
-        .map_err(|e| format!("Network error: {}", e))?;
+    let res = client.post("https://littleskin.cn/api/yggdrasil/authserver/authenticate")
+        .json(&body).send().await.map_err(|e| e.to_string())?;
 
-    if response.status().is_success() {
-        let auth_data: Value = response.json().await.map_err(|e| e.to_string())?;
-        let profile = auth_data["availableProfiles"][0].clone();
-        let profile_id = profile["id"].as_str().ok_or("Invalid profile")?;
-
-        let texture_url = format!("https://littleskin.cn/api/yggdrasil/sessionserver/session/minecraft/profile/{}", profile_id);
-        let texture_data: Value = client.get(&texture_url).send().await
-            .map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
-
-        let texture_base64 = texture_data["properties"][0]["value"].as_str().unwrap_or("");
-        let decoded = STANDARD.decode(texture_base64).unwrap_or_default();
-        let decoded_json: Value = serde_json::from_slice(&decoded).unwrap_or(serde_json::json!({}));
-        let skin_url = decoded_json["textures"]["SKIN"]["url"].as_str().unwrap_or("").to_string();
-
-        let user = UserInfo {
-            name: profile["name"].as_str().unwrap_or("Player").into(),
-            uuid: profile_id.into(),
-            access_token: auth_data["accessToken"].as_str().unwrap_or("").into(),
-            skin_url,
-            auth_type: "Yggdrasil".into(),
-        };
-
-        let mut auth_state = state.lock().unwrap();
-        auth_state.users.retain(|u| u.uuid != user.uuid);
-        auth_state.users.push(user.clone());
-        auth_state.current_user_id = Some(user.uuid.clone());
-        let _ = auth_state.save();
-
-        Ok(user)
-    } else {
-        Err("Authentication failed".into())
+    let data: Value = res.json().await.map_err(|e| e.to_string())?;
+    if let Some(msg) = data.get("errorMessage").and_then(|v| v.as_str()) {
+        return Err(msg.to_string());
     }
+
+    if let Some(selected) = data.get("selectedProfile").filter(|v| !v.is_null()) {
+        // 情况 1: 已有角色，直接进入
+        let user = process_user_info(&client, &data["accessToken"], selected).await?;
+
+        let mut s = state.lock().unwrap();
+        s.users.retain(|u| u.uuid != user.uuid);
+        s.users.push(user.clone());
+        s.current_user_id = Some(user.uuid.clone());
+        let _ = s.save();
+
+        Ok(AuthResponse::Success(user))
+    } else {
+        // 情况 2: 需要选角
+        Ok(AuthResponse::NeedSelection {
+            profiles: serde_json::from_value(data["availableProfiles"].clone()).unwrap_or_default(),
+            access_token: data["accessToken"].as_str().unwrap_or("").to_string(),
+            client_token: data["clientToken"].as_str().unwrap_or("").to_string(),
+        })
+    }
+}
+
+#[tauri::command]
+async fn yggdrasil_select(
+    access_token: String,
+    client_token: String,
+    profile: Profile,
+    state: tauri::State<'_, Mutex<AuthState>>,
+) -> Result<UserInfo, String> {
+    let client = reqwest::Client::new();
+    let res = client.post("https://littleskin.cn/api/yggdrasil/authserver/refresh")
+        .json(&serde_json::json!({
+            "accessToken": access_token,
+            "clientToken": client_token,
+            "selectedProfile": profile
+        })).send().await.map_err(|e| e.to_string())?;
+
+    let data: Value = res.json().await.map_err(|e| e.to_string())?;
+
+    // 刷新后通常返回 selectedProfile，使用它构建最终 UserInfo
+    let user = process_user_info(&client, &data["accessToken"], &data["selectedProfile"]).await?;
+
+    let mut s = state.lock().unwrap();
+    s.users.retain(|u| u.uuid != user.uuid);
+    s.users.push(user.clone());
+    s.current_user_id = Some(user.uuid.clone());
+    let _ = s.save();
+
+    Ok(user)
 }
 
 #[tauri::command]
@@ -563,10 +641,12 @@ fn scan_java_environments() -> Vec<JavaInfo> {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .manage(Mutex::new(AuthState::load()))
         .manage(Mutex::new(Config::load()))
         .invoke_handler(tauri::generate_handler![
             yggdrasil_login,
+            yggdrasil_select,
             save_config,
             get_config,
             get_total_memory,
