@@ -10,8 +10,17 @@ use std::fs;
 use std::path::{PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
+use std::sync::Arc;
 use sysinfo::System;
+use tauri_plugin_opener::OpenerExt;
+use tauri::Emitter;
+use reqwest::Client;
 
+
+const CLIENT_ID: &str = match option_env!("MS_CLIENT_ID") {
+    Some(id) => id,
+    None => "DEFAULT_ID_OR_ERROR",
+};
 // -------------------- 数据结构 --------------------
 
 #[derive(Deserialize)]
@@ -69,6 +78,20 @@ pub struct Profile {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McProfile {
+    pub id: String,
+    pub name: String,
+    pub skins: Vec<Skin>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Skin {
+    pub id: String,
+    pub url: String,
+    pub variant: String,
+}
+
 #[derive(Serialize)]
 #[serde(tag = "status", content = "data")]
 pub enum AuthResponse {
@@ -80,6 +103,14 @@ pub enum AuthResponse {
         access_token: String,
         client_token: String,
     },
+}
+
+#[derive(Deserialize)]
+struct DeviceCodeResponse {
+    user_code: String,
+    device_code: String,
+    verification_uri: String,
+    interval: u64,
 }
 
 #[derive(Serialize)]
@@ -232,14 +263,12 @@ async fn process_user_info(
     let profile_id = profile_data["id"].as_str().ok_or("Invalid profile id")?;
     let profile_name = profile_data["name"].as_str().unwrap_or("Player");
 
-    // 获取纹理数据
     let texture_url = format!("https://littleskin.cn/api/yggdrasil/sessionserver/session/minecraft/profile/{}", profile_id);
     let texture_res = client.get(&texture_url).send().await
         .map_err(|e| e.to_string())?;
 
     let texture_data: Value = texture_res.json().await.map_err(|e| e.to_string())?;
 
-    // 解析皮肤 URL (保持你原有的解密逻辑)
     let mut skin_url = String::new();
     if let Some(props) = texture_data["properties"].as_array() {
         if let Some(val_str) = props[0]["value"].as_str() {
@@ -263,6 +292,200 @@ async fn process_user_info(
     })
 }
 // -------------------- Tauri 命令 --------------------
+
+#[tauri::command]
+async fn ms_login(app: tauri::AppHandle,  state: tauri::State<'_, Arc<Mutex<AuthState>>>) -> Result<String, String> {
+    let client = reqwest::Client::new();
+
+    // 1. 向微软请求设备码
+    let params = [
+        ("client_id", CLIENT_ID),
+        ("scope", "XboxLive.signin offline_access"),
+    ];
+
+    let res = client
+        .post("https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode")
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let data: DeviceCodeResponse = res.json().await.map_err(|e| e.to_string())?;
+
+    // 2. 这里的逻辑：把 user_code 发给前端显示，同时打开验证页面
+    let user_code = data.user_code.clone();
+    let device_code = data.device_code.clone();
+    let interval = data.interval;
+
+    // 自动打开浏览器让用户输入
+    app.opener().open_url(&data.verification_uri, None::<String>).map_err(|e| e.to_string())?;
+
+    // 3. 启动后台异步任务进行轮询
+    let handle = app.clone();
+    let auth_state_arc = state.inner().clone();
+    tauri::async_runtime::spawn(async move {
+        let poll_url = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+
+            let poll_params = [
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                ("client_id", CLIENT_ID),
+                ("device_code", &device_code),
+            ];
+
+            let poll_res = client.post(poll_url).form(&poll_params).send().await;
+
+            if let Ok(r) = poll_res {
+                let status = r.status();
+                let body: serde_json::Value = r.json().await.unwrap_or_default();
+
+                if status.is_success() {
+                    // 登录成功！body 里包含 access_token 和 refresh_token
+                    let token = body["access_token"].as_str().unwrap_or("");
+                    match authenticate_minecraft(token, auth_state_arc.clone()).await {
+                                Ok(profile) => {
+                                    // 真正成功：所有验证步骤通过，数据已写入 state
+                                    handle.emit("ms-login-success", profile).unwrap();
+                                }
+                                Err(e) => {
+                                    // 逻辑失败：例如 Xbox 验证失败或没有购买游戏
+                                    handle.emit("ms-login-error", format!("验证失败: {}", e)).unwrap();
+                                }
+                            }
+                    break;
+                } else {
+                    let error = body["error"].as_str().unwrap_or("");
+                    if error == "authorization_pending" {
+                        continue; // 用户还没输完，继续等
+                    } else {
+                        handle.emit("ms-status", format!("错误: {}", error)).unwrap();
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    Ok(user_code)
+}
+
+async fn authenticate_minecraft(
+    ms_access_token: &str,
+    state: Arc<Mutex<AuthState>>,
+) -> Result<McProfile, String> {
+    let client = Client::new();
+
+    // --- XBL ---
+    println!("[Auth] Step 1: Requesting XBL Token...");
+    let xbl_res = client.post("https://user.auth.xboxlive.com/user/authenticate")
+        .json(&serde_json::json!({
+            "Properties": {
+                "AuthMethod": "RPS",
+                "SiteName": "user.auth.xboxlive.com",
+                "RpsTicket": format!("d={}", ms_access_token)
+            },
+            "RelyingParty": "http://auth.xboxlive.com",
+            "TokenType": "JWT"
+        }))
+        .send().await.map_err(|e| format!("XBL Request Failed: {}", e))?;
+
+    let xbl_data: serde_json::Value = xbl_res.json().await.map_err(|e| format!("XBL JSON Parse Error: {}", e))?;
+    let xbl_token = xbl_data["Token"].as_str().ok_or("XBL Token missing in response")?;
+    let user_hash = xbl_data["DisplayClaims"]["xui"][0]["uhs"]
+        .as_str().ok_or("UHS (User Hash) missing in response")?;
+    println!("[Auth] Step 1 Success: Got UHS {}", user_hash);
+
+    // --- XSTS ---
+    println!("[Auth] Step 2: Requesting XSTS Token...");
+    let xsts_res = client.post("https://xsts.auth.xboxlive.com/xsts/authorize")
+        .json(&serde_json::json!({
+            "Properties": {
+                "SandboxId": "RETAIL",
+                "UserTokens": [xbl_token]
+            },
+            "RelyingParty": "rp://api.minecraftservices.com/",
+            "TokenType": "JWT"
+        }))
+        .send().await.map_err(|e| format!("XSTS Request Failed: {}", e))?;
+
+    let xsts_status = xsts_res.status();
+    let xsts_data: serde_json::Value = xsts_res.json().await.map_err(|e| format!("XSTS JSON Parse Error: {}", e))?;
+
+    // Xbox 账号可能没有 Minecraft 权限或未成年
+    if !xsts_status.is_success() {
+        return Err(format!("XSTS Auth Failed with status {}: {}", xsts_status, xsts_data));
+    }
+
+    let xsts_token = xsts_data["Token"].as_str().ok_or("XSTS Token missing")?;
+    println!("[Auth] Step 2 Success: XSTS Token obtained: {}", xsts_token);
+
+    // --- Minecraft 登录 ---
+    println!("[Auth] Step 3: Logging into Minecraft Services...");
+    let identity_token = format!("XBL3.0 x={};{}", user_hash, xsts_token);
+
+    let mc_login_res = client.post("https://api.minecraftservices.com/authentication/login_with_xbox")
+        .json(&serde_json::json!({
+            "identityToken": identity_token
+        }))
+        .send().await.map_err(|e| format!("MC Login Request Failed: {}", e))?;
+
+    let mc_status = mc_login_res.status();
+    let mc_body_text = mc_login_res.text().await.map_err(|e| e.to_string())?;
+
+    if !mc_status.is_success() {
+        println!("[Auth] Step 3 FAILED. Status: {}, Body: {}", mc_status, mc_body_text);
+        return Err(format!("Minecraft Auth Server returned {}", mc_status));
+    }
+
+    // 只有成功了再解析 JSON
+    let mc_data: serde_json::Value = serde_json::from_str(&mc_body_text).map_err(|e| e.to_string())?;
+    let mc_access_token = mc_data["access_token"].as_str().ok_or("MC Access Token missing in JSON")?;
+    println!("[Auth] Step 3 Success: MC Access Token length: {}", mc_access_token.len());
+
+    // --- 第四步：获取 Profile ---
+    println!("[Auth] Step 4: Fetching Minecraft Profile...");
+    let profile_res = client.get("https://api.minecraftservices.com/minecraft/profile")
+        .bearer_auth(mc_access_token)
+        .send().await.map_err(|e| format!("Profile Request Failed: {}", e))?;
+
+    if profile_res.status() == 404 {
+        return Err("User does not own Minecraft on this account.".into());
+    }
+
+    let profile = profile_res.json::<McProfile>().await.map_err(|e| format!("Profile Parse Error: {}", e))?;
+    println!("[Auth] Step 4 Success: Found player {}", profile.name);
+
+    // ====== 写入状态 ======
+    println!("[Auth] Final Step: Writing state to memory and disk...");
+
+    // 尽量缩短 Mutex 锁定时间
+    {
+        let mut s = state.lock().map_err(|_| "Failed to acquire lock: Mutex is poisoned")?;
+
+        // 记录原始数量对比
+        let old_count = s.users.len();
+        s.users.retain(|u| u.uuid != profile.id);
+
+        s.users.push(UserInfo {
+            uuid: profile.id.clone(),
+            name: profile.name.clone(),
+            access_token: mc_access_token.to_string(),
+            auth_type: "Microsoft".into(),
+            skin_url: "".into(),
+        });
+
+        s.current_user_id = Some(profile.id.clone());
+
+        // 捕获持久化错误
+        match s.save() {
+            Ok(_) => println!("[Auth] State saved successfully. Users count: {} -> {}", old_count, s.users.len()),
+            Err(e) => println!("[Auth] CRITICAL: State memory updated but disk save failed: {}", e),
+        }
+    }
+
+    Ok(profile)
+}
 
 #[tauri::command]
 async fn yggdrasil_login(
@@ -563,7 +786,6 @@ fn parse_java_display_name(full_output: &str) -> String {
             .map_or("??".to_string(), |m| m.as_str().to_string())
     };
 
-    // 3. 逻辑处理：1.8 -> 8, 21.0.6 -> 21
     if version_num.starts_with("1.8") {
         version_num = "8".to_string();
     } else {
@@ -644,7 +866,9 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .manage(Mutex::new(AuthState::load()))
         .manage(Mutex::new(Config::load()))
+        .manage(Arc::new(Mutex::new(AuthState::load())))
         .invoke_handler(tauri::generate_handler![
+            ms_login,
             yggdrasil_login,
             yggdrasil_select,
             save_config,
