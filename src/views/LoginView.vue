@@ -17,13 +17,13 @@
               <svg viewBox="0 0 23 23" class="w-4 h-4"><path fill="#f3f3f3" d="M0 0h23v23H0z"/><path fill="#f35325" d="M1 1h10v10H1z"/><path fill="#81bc06" d="M12 1h10v10H12z"/><path fill="#05a6f0" d="M1 12h10v10H1z"/><path fill="#ffba08" d="M12 12h10v10H12z"/></svg>
             </div>
             <div class="text-center mt-3 mb-5">
-              <p class="text-[9px] font-black text-slate-600 uppercase tracking-tighter">微软账号</p>
-              <p class="text-[8px] text-slate-400 mt-0.5 font-medium">正版用户使用此方式</p>
+              <p class="text-[11px] font-black text-slate-600 uppercase tracking-tighter">微软账号</p>
+              <p class="text-[9px] text-slate-400 mt-0.5 font-medium">正版用户使用此方式</p>
             </div>
             <button @click="loginWithMicrosoft"
                     :disabled="isMsLoading"
-                    class="w-full py-3.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-[10px] font-black tracking-[0.2em] transition-all active:scale-95 shadow-lg shadow-blue-100 disabled:bg-slate-200 disabled:shadow-none">
-              {{ isMsLoading ? 'REQUESTING...' : '获取登录验证码' }}
+                    class="w-full py-3.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-[11px] font-black tracking-[0.2em] transition-all active:scale-95 shadow-lg shadow-blue-100 disabled:bg-slate-200 disabled:shadow-none">
+              {{ isMsLoading ? '获取中' : '获取登录验证码' }}
             </button>
           </template>
 
@@ -149,14 +149,14 @@ onMounted(async () => {
     }
   })
 
-  unlistenSuccess = await listen<any>('ms-login-success', (event) => {
+  unlistenSuccess = await listen<any>('ms-login-success', () => {
     isMsLoading.value = false
     deviceCode.value = ""
     toast.success("微软登录成功！")
     router.push('/')
   })
 
-  unlistenSuccess = await listen<any>('ms-login-error', (event) => {
+  unlistenSuccess = await listen<any>('ms-login-error', () => {
     isMsLoading.value = false
     deviceCode.value = ""
     toast.error("微软登录失败！")
@@ -185,7 +185,6 @@ const loginWithMicrosoft = async () => {
   msLoadingText.value = "正在请求微软服务器...";
 
   try {
-    // 假设后端命令名称为 ms_login
     const code = await invoke<string>('ms_login');
     deviceCode.value = code;
     await copyToClipboard(code);
@@ -196,7 +195,6 @@ const loginWithMicrosoft = async () => {
   }
 };
 
-// Yggdrasil 登录保持原逻辑
 const loginWithYggdrasil = async () => {
   if (!authForm.email || !authForm.password) { toast.error("请输入账号密码"); return; }
   isLoading.value = true
@@ -205,7 +203,7 @@ const loginWithYggdrasil = async () => {
     if (res.status === 'success') { await router.push('/'); }
     else if (res.status === 'need_selection') {
       availableProfiles.value = res.data.profiles
-      selectionContext.value = { accessToken: res.data.access_token, client_token: res.data.client_token }
+      selectionContext.value = { accessToken: res.data.access_token, clientToken: res.data.client_token }
       showProfileSelector.value = true
     }
   } catch (err: any) {
@@ -218,9 +216,11 @@ const selectProfile = async (profile: any) => {
   isLoading.value = true
   try {
     await invoke('yggdrasil_select', {
-      access_token: selectionContext.value.accessToken,
-      client_token: selectionContext.value.clientToken,
-      profile: { id: profile.id, name: profile.name }
+      payload: {
+        accessToken: selectionContext.value.accessToken,
+        clientToken: selectionContext.value.clientToken,
+        profile: { id: profile.id, name: profile.name }
+      }
     })
     await router.push('/')
   } catch (err) { toast.error("角色选择失败: " + err); }

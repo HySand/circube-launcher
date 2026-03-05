@@ -1,6 +1,6 @@
 <template>
   <div
-      class="w-screen h-screen overflow-hidden rounded-2xl border shadow-2xl relative flex flex-col
+      class="w-screen h-screen overflow-hidden rounded-2xl border relative flex flex-col
              bg-background text-foreground border-border">
     <TitleBar/>
     <Toaster richColors position="top-center" :duration="1500"/>
