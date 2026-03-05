@@ -29,37 +29,58 @@
       </div>
     </div>
 
-    <div class="mt-8">
+    <div class="mt-8 flex flex-col items-center gap-2">
+      <p v-if="isLaunching" class="text-[10px] text-blue-500 font-bold animate-pulse tracking-widest uppercase">
+        {{ launchStatus }}
+      </p>
       <button @click="handleLaunch"
-              class="w-full py-5 bg-blue-600 hover:bg-blue-700 text-white rounded-[24px] text-[12px] font-black tracking-widest shadow-lg shadow-blue-100 transition-all duration-300 active:scale-95 flex items-center justify-center gap-3 group uppercase">
-        <span>CirCube 启动！</span>
-        <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 group-hover:translate-y-[-2px] transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-          <path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>
-        </svg>
+              :disabled="isLaunching"
+              class="w-full py-5 text-white rounded-[24px] text-[12px] font-black tracking-widest shadow-lg transition-all duration-300 active:scale-95 flex items-center justify-center gap-3 group"
+              :class="[isLaunching ? 'bg-slate-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 shadow-blue-100']">
+        <template v-if="!isLaunching">
+          <span>CirCube 启动！</span>
+          <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 group-hover:translate-y-[-2px] transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>
+          </svg>
+        </template>
+        <template v-else>
+          <svg class="animate-spin h-5 w-5 text-white" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <span>CirCube运行中</span>
+        </template>
       </button>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import {ref, onMounted, watch, nextTick} from "vue";
+import {ref, onMounted, onUnmounted, watch, nextTick} from "vue";
 import { useRouter } from "vue-router";
 import { useCacheStore } from '@/stores/cache';
 import * as skinview3d from 'skinview3d';
 import {invoke} from "@tauri-apps/api/core";
+import {listen, UnlistenFn} from "@tauri-apps/api/event";
 
 const router = useRouter();
 const cache = useCacheStore();
 
 const username = ref(cache.user?.name ?? "");
 const quote = ref(cache.quote);
-
 const skinUrl = ref(cache.user?.skinUrl ?? "https://textures.minecraft.net/texture/58806cf80200b93b3a3471ef0fc0326a4bb8daf69af7d2929764e4149988882e");
 
 const container = ref<HTMLElement | null>(null);
 let viewer: skinview3d.SkinViewer | null = null;
 
-onMounted(() => {
+// 新增：启动状态变量
+const isLaunching = ref(false);
+const launchStatus = ref("");
+let unlistenStatus: UnlistenFn;
+let unlistenExit: UnlistenFn;
+
+onMounted(async () => {
+  // 保持原有皮肤预览逻辑
   if (container.value && skinUrl.value) {
     viewer = new skinview3d.SkinViewer({
       canvas: document.createElement('canvas'),
@@ -67,10 +88,25 @@ onMounted(() => {
       height: 320,
       skin: skinUrl.value
     });
-
     container.value.appendChild(viewer.canvas);
     viewer.animation = new skinview3d.IdleAnimation();
   }
+
+  // 监听进度状态
+  unlistenStatus = await listen<string>("launch-status", (event) => {
+    launchStatus.value = event.payload;
+  });
+
+  // 监听退出
+  unlistenExit = await listen("game-exited", () => {
+    isLaunching.value = false;
+    launchStatus.value = "";
+  });
+});
+
+onUnmounted(() => {
+  if (unlistenStatus) unlistenStatus();
+  if (unlistenExit) unlistenExit();
 });
 
 watch(() => cache.quote, async (newQuote) => {
@@ -79,9 +115,13 @@ watch(() => cache.quote, async (newQuote) => {
 });
 
 const handleLaunch = async () => {
+  if (isLaunching.value) return;
+  isLaunching.value = true;
+  launchStatus.value = "正在初始化...";
   try {
     await invoke("launch_minecraft");
   } catch (e) {
+    isLaunching.value = false;
     console.error(e);
   }
 };

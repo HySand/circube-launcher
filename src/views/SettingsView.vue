@@ -18,7 +18,7 @@
                   {{ selectedJava?.version || (javaDetailList.length > 0 ? '请选择 Java 环境' : '未检测到 Java') }}
                 </span>
                 <span class="text-[9px] text-slate-400 truncate font-mono opacity-60 w-full">
-                  {{ selectedJava?.path || '等待后端扫描...' }}
+                  {{ selectedJava?.path || '等待扫描...' }}
                 </span>
               </div>
               <ChevronsUpDown class="ml-2 h-4 w-4 shrink-0 opacity-30 text-slate-400" />
@@ -200,7 +200,7 @@ const handleLogout = async () => {
   await invoke('logout_current_user')
   await router.push('/')
 }
-
+interface JavaInfo { path: string; version: string }
 onMounted(async () => {
   await nextTick()
   updateWidth()
@@ -218,6 +218,13 @@ onMounted(async () => {
   } else {
     sliderValue.value = [config.value.maxMemory]
   }
+
+  invoke<JavaInfo[]>('scan_java_environments').then(async (list) => {
+    if (list && list.length > 0) {
+      cache.setJavaList(list);
+    }
+  });
+
 })
 
 onUnmounted(() => resizeObserver?.disconnect())

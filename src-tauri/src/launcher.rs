@@ -5,6 +5,8 @@ use std::fs;
 use std::process::Command;
 use std::sync::Mutex;
 use sysinfo::System;
+use tauri::{AppHandle, Emitter, State};
+use crate::utils::validate_java;
 
 #[derive(Deserialize)]
 pub struct VersionConfig {
@@ -110,10 +112,17 @@ impl Argument {
 }
 
 #[tauri::command]
-pub fn launch_minecraft(
-    auth_state: tauri::State<'_, Mutex<AuthState>>,
-    config_state: tauri::State<'_, Mutex<Config>>,
+pub async fn launch_minecraft(
+    app: AppHandle,
+    auth_state: State<'_, Mutex<AuthState>>,
+    config_state: State<'_, Mutex<Config>>,
 ) -> Result<(), String> {
+    // 进度反馈闭包
+    let emit_progress = |msg: &str| {
+        let _ = app.emit("launch-status", msg);
+    };
+
+    emit_progress("正在校验用户身份...");
     let auth = auth_state.lock().unwrap();
     let config = config_state.lock().unwrap();
 
@@ -121,14 +130,16 @@ pub fn launch_minecraft(
         .and_then(|id| auth.users.iter().find(|u| &u.uuid == id))
         .ok_or("User not logged in")?;
 
+    emit_progress("正在准备文件系统...");
     let base_dir = std::env::current_exe().map_err(|e| e.to_string())?.parent().unwrap().to_path_buf();
     let mc_dir = base_dir.join(".minecraft");
 
     let version_name = "CirCube Zero";
     let version_json_path = mc_dir.join(format!("versions/{0}/{0}.json", version_name));
-    let raw_json = fs::read_to_string(&version_json_path).map_err(|_| "Missing {version_name}.json")?;
+    let raw_json = fs::read_to_string(&version_json_path).map_err(|_| format!("Missing {}.json", version_name))?;
     let ver_cfg: VersionConfig = serde_json::from_str(&raw_json).map_err(|e| e.to_string())?;
 
+    emit_progress("正在扫描依赖库...");
     let libs_base = mc_dir.join("libraries");
     let cp_sep = if cfg!(windows) { ";" } else { ":" };
 
@@ -161,6 +172,7 @@ pub fn launch_minecraft(
         }
     }
 
+    emit_progress("正在构建环境变量...");
     let mut env = HashMap::new();
     let cp_str = cp_list.join(cp_sep);
 
@@ -186,9 +198,8 @@ pub fn launch_minecraft(
     env.insert("${quickPlayMultiplayer}", "".into());
     env.insert("${quickPlayRealms}", "".into());
 
-    let mut final_args = Vec::new();
+    emit_progress("正在优化内存配置...");
     let mut final_max_memory = config.max_memory;
-
     if final_max_memory == 0 {
         let mut sys = System::new_all();
         sys.refresh_memory();
@@ -197,9 +208,9 @@ pub fn launch_minecraft(
         let available = total_mb.saturating_sub(used_mb).saturating_sub(512);
         let recommendation = ((available as f64 * 0.75) / 512.0).floor() as u64 * 512;
         final_max_memory = std::cmp::max(2048, recommendation);
-        println!("[Launch] Auto-tuning memory: {}MB", final_max_memory);
     }
 
+    let mut final_args = Vec::new();
     final_args.push(format!("-Xms{}M", final_max_memory));
     final_args.push(format!("-Xmx{}M", final_max_memory));
     final_args.push("-Dfile.encoding=UTF-8".into());
@@ -229,13 +240,32 @@ pub fn launch_minecraft(
     }
     final_args.retain(|arg| arg != "--demo");
 
-    let java_exec = if config.java_path.is_empty() { "java" } else { &config.java_path };
+    emit_progress("正在验证JAVA...");
 
-    Command::new(java_exec)
+    match validate_java(config.java_path.clone()) {
+       Ok(info) => {
+            emit_progress(&format!("Java 校验通过: {} ({})", info.version, info.path));
+       }
+       Err(err) => {
+            emit_progress(&format!("Java 验证失败: {}", err));
+            return Err(format!("无法启动游戏: {}", err));
+       }
+    }
+    emit_progress("正在启动 JVM...");
+
+    let mut child = Command::new(config.java_path.clone())
         .args(&final_args)
         .current_dir(&mc_dir)
         .spawn()
         .map_err(|e| format!("Launch failed: {}", e))?;
 
+    // 监控进程退出
+    let handle_clone = app.clone();
+    std::thread::spawn(move || {
+        let _ = child.wait();
+        let _ = handle_clone.emit("game-exited", ());
+    });
+
+    emit_progress("游戏已运行");
     Ok(())
 }

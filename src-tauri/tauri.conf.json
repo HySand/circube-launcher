@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "circube-launcher",
+  "productName": "CirCube Launcher",
   "version": "0.1.0",
   "identifier": "circube-launcher",
   "build": {

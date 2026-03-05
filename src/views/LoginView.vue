@@ -62,7 +62,7 @@
         <div class="flex-1 relative min-h-[130px]">
           <div v-if="!showProfileSelector" class="absolute inset-0 flex flex-col justify-center space-y-2.5 animate-in fade-in duration-300">
             <div class="space-y-1.5">
-              <input v-model="authForm.email" type="text" placeholder="账号"
+              <input v-model="authForm.email" type="text" placeholder="邮箱或用户名"
                      class="w-full px-4 py-2.5 bg-white border border-slate-100 rounded-xl text-[10px] font-medium focus:outline-none focus:border-emerald-500 transition-all" />
               <input v-model="authForm.password" type="password" placeholder="密码"
                      class="w-full px-4 py-2.5 bg-white border border-slate-100 rounded-xl text-[10px] font-medium focus:outline-none focus:border-emerald-500 transition-all" />

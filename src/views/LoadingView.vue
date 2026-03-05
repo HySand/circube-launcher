@@ -29,53 +29,57 @@ interface Config { javaPath: string; maxMemory: number }
 interface JavaInfo { path: string; version: string }
 
 onMounted(async () => {
-  fetchQuote()
+  fetchQuote();
   try {
-    const [currentUser, savedConfig, totalMemory, javaList] = await Promise.all([
+    // 第一步：只拿核心配置和用户信息（速度极快）
+    const [currentUser, savedConfig, totalMemory] = await Promise.all([
       invoke<UserInfo | null>('get_current_user'),
       invoke<Config>('get_config'),
       invoke<number>('get_total_memory'),
-      invoke<JavaInfo[]>('scan_java_environments'),
     ]);
 
-    // 1. 基础数据注入 Store
     if (totalMemory) cache.setTotalMem(totalMemory);
-    if (javaList) cache.setJavaList(javaList);
+    cache.setSettings(savedConfig);
+    if (currentUser) cache.setUser(currentUser);
 
-    // 2. Java 路径决策逻辑
-    let finalConfig = { ...savedConfig };
-    let needSilenceSave = false;
+    // 第二步：判断是否需要执行 Java 扫描
+    const checkJavaAndProceed = async () => {
+      let isJavaReady = false;
 
-    if (javaList && javaList.length > 0) {
-      // 检查当前路径是否有效
-      const isPathValid = javaList.some(j => j.path === savedConfig.javaPath);
-
-      // 仅在路径为空或无效时进行选择
-      if (!savedConfig.javaPath || savedConfig.javaPath === "" || !isPathValid) {
-        finalConfig.javaPath = javaList[0].path;
-        needSilenceSave = true;
-        console.log("[Boot] Auto-selected valid Java:", finalConfig.javaPath);
+      // 场景 A: 存在保存的路径 -> 执行轻量级验证
+      if (savedConfig.javaPath && savedConfig.javaPath.trim() !== "") {
+        try {
+          const validInfo = await invoke<JavaInfo>('validate_java', { path: savedConfig.javaPath });
+          cache.setJavaList([validInfo]);
+          isJavaReady = true;
+          console.log("[Boot] Java validated:", validInfo.version);
+        } catch (err) {
+          console.warn("[Boot] Saved Java path is invalid, falling back to scan.");
+        }
       }
-    }
 
-    // 3. 更新配置 Store
-    cache.setSettings(finalConfig);
+      // 场景 B: 路径不存在或验证失败 -> 执行全量扫描
+      if (!isJavaReady) {
+        invoke<JavaInfo[]>('scan_java_environments').then(async (list) => {
+          if (list && list.length > 0) {
+            cache.setJavaList(list);
+            const firstJava = list[0];
+            const newConfig = { ...savedConfig, javaPath: firstJava.path };
+            cache.setSettings(newConfig);
+            await invoke('save_config', { config: newConfig });
+            console.log("[Boot] Background scan completed and auto-saved.");
+          }
+        });
+      }
+    };
 
-    // 4. 静默持久化
-    if (needSilenceSave) {
-      await invoke('save_config', { config: finalConfig });
-    }
+    // 执行 Java 检查逻辑（不 await，避免阻塞跳转）
+    await checkJavaAndProceed();
 
-    // 5. 路由分发
-    if (currentUser) {
-      cache.setUser(currentUser);
-      await router.replace("/main");
-    } else {
-      await router.replace("/login");
-    }
+    await router.replace(currentUser ? "/main" : "/login");
   } catch (error) {
     console.error("[Boot] Initialization failed:", error);
     await router.replace("/login");
   }
-})
+});
 </script>

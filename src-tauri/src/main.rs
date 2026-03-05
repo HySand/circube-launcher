@@ -57,7 +57,8 @@ fn main() {
             get_current_user,
             launcher::launch_minecraft,
             logout_current_user,
-            utils::scan_java_environments
+            utils::scan_java_environments,
+            utils::validate_java
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
