@@ -23,13 +23,13 @@
             <button @click="loginWithMicrosoft"
                     :disabled="isMsLoading"
                     class="w-full py-3.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-[11px] font-black tracking-[0.2em] transition-all active:scale-95 shadow-lg shadow-blue-100 disabled:bg-slate-200 disabled:shadow-none">
-              {{ isMsLoading ? '获取中' : '获取登录验证码' }}
+              {{ isMsLoading ? '获取中' : '获取登录代码' }}
             </button>
           </template>
 
           <div v-else class="w-full flex flex-col items-center animate-in fade-in space-y-4">
             <div class="flex flex-col items-center gap-1">
-              <p class="text-[10px] text-slate-600 font-bold uppercase">验证码已复制到剪贴板</p>
+              <p class="text-[10px] text-slate-600 font-bold uppercase">代码已复制到剪贴板</p>
             </div>
 
             <div @click="copyToClipboard(deviceCode)"
@@ -172,7 +172,7 @@ onUnmounted(() => {
 const copyToClipboard = async (text: string) => {
   try {
     await navigator.clipboard.writeText(text);
-    toast.success("验证码已重新复制");
+    toast.success("代码已重新复制");
   } catch (err) {
     console.error("Clipboard error: ", err);
   }

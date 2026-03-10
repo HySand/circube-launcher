@@ -62,6 +62,7 @@ import { useCacheStore } from '@/stores/cache';
 import * as skinview3d from 'skinview3d';
 import {invoke} from "@tauri-apps/api/core";
 import {listen, UnlistenFn} from "@tauri-apps/api/event";
+import { toast } from 'vue-sonner';
 
 const router = useRouter();
 const cache = useCacheStore();
@@ -121,6 +122,11 @@ const handleLaunch = async () => {
   try {
     await invoke("launch_minecraft");
   } catch (e) {
+    if (String(e).includes("TOKEN_EXPIRED")) {
+      toast.error("账户已过期，请重新登录");
+      await invoke('logout_current_user')
+      await router.push("/");
+    }
     isLaunching.value = false;
     console.error(e);
   }

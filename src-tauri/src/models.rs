@@ -55,7 +55,6 @@ pub struct UserInfo {
     pub uuid: String,
     pub access_token: String,
     pub skin_url: String,
-    #[allow(dead_code)]
     pub auth_type: String,
 }
 

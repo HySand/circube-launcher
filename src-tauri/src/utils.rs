@@ -4,6 +4,8 @@ use std::process::Command;
 use sysinfo::System;
 use std::path::PathBuf;
 use std::collections::HashSet;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 #[tauri::command]
 pub fn get_total_memory() -> u64 {
@@ -54,7 +56,7 @@ pub fn parse_java_display_name(full_output: &str) -> String {
 }
 
 #[tauri::command]
-pub fn scan_java_environments() -> Vec<JavaInfo> {
+pub async fn scan_java_environments() -> Vec<JavaInfo> {
     let mut found_paths: HashSet<PathBuf> = HashSet::new();
 
     // 1. 基于 PATH 环境变量查询
@@ -66,6 +68,10 @@ pub fn scan_java_environments() -> Vec<JavaInfo> {
 
     // 执行系统搜索指令 (where / which -a)
     let mut cmd = Command::new(search_cmd);
+    #[cfg(windows)]
+        {
+            cmd.creation_flags(0x08000000);
+        }
     if !cfg!(windows) { cmd.arg("-a"); }
     cmd.arg(target_bin);
 

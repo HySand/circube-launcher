@@ -262,3 +262,56 @@ pub async fn yggdrasil_select(
     let _ = s.save();
     Ok(user)
 }
+
+pub async fn ensure_authenticated(
+    uuid: &str,
+    auth_type: &str,
+    access_token: &str,
+    state: &Mutex<AuthState>,
+) -> Result<(), String> {
+    let client = reqwest::Client::new();
+
+    match auth_type {
+        "Yggdrasil" => {
+            let base_url = "https://littleskin.cn/api/yggdrasil/authserver";
+
+            // 1. Validate
+            let val_res = client.post(format!("{}/validate", base_url))
+                .json(&serde_json::json!({ "accessToken": access_token }))
+                .send().await.map_err(|e| e.to_string())?;
+
+            if val_res.status() == 204 { return Ok(()); }
+
+            // 2. Refresh
+            let ref_res = client.post(format!("{}/refresh", base_url))
+                .json(&serde_json::json!({ "accessToken": access_token, "requestUser": true }))
+                .send().await.map_err(|e| e.to_string())?;
+
+            if ref_res.status().is_success() {
+                let data: serde_json::Value = ref_res.json().await.map_err(|e| e.to_string())?;
+                // 调用你已有的处理逻辑
+                let updated_user = process_user_info(&client, &data["accessToken"], &data["selectedProfile"]).await?;
+
+                let mut s = state.lock().unwrap();
+                s.users.retain(|u| u.uuid != uuid);
+                s.users.push(updated_user);
+                let _ = s.save();
+                return Ok(());
+            }
+
+            Err("YGGDRASIL_TOKEN_EXPIRED".into())
+        },
+        "Microsoft" => {
+            let prof_res = client.get("https://api.minecraftservices.com/minecraft/profile")
+                .bearer_auth(access_token)
+                .send().await.map_err(|e| e.to_string())?;
+
+            if prof_res.status().is_success() {
+                Ok(())
+            } else {
+                Err("MS_TOKEN_EXPIRED".into())
+            }
+        },
+        _ => Ok(()),
+    }
+}
