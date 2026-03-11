@@ -4,6 +4,7 @@ mod models;
 mod auth;
 mod launcher;
 mod utils;
+mod updater;
 
 use std::sync::{Arc, Mutex};
 use std::fs;
@@ -58,7 +59,8 @@ fn main() {
             launcher::launch_minecraft,
             logout_current_user,
             utils::scan_java_environments,
-            utils::validate_java
+            utils::validate_java,
+            updater::sync_versions
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

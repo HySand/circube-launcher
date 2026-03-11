@@ -124,24 +124,21 @@ pub async fn launch_minecraft(
 
     emit_progress("正在校验用户身份...");
 
-    // --- 核心修改：在进入异步调用前，通过作用域提取并克隆必要数据，然后立即释放锁 ---
     let (user_uuid, auth_type, access_token, user_name) = {
         let auth = auth_state.lock().unwrap();
         let user = auth.current_user_id.as_ref()
             .and_then(|id| auth.users.iter().find(|u| &u.uuid == id))
             .ok_or_else(|| "User not logged in".to_string())?;
 
-        // 仅克隆启动所需的字段
         (user.uuid.clone(), user.auth_type.clone(), user.access_token.clone(), user.name.clone())
-    }; // 锁在此处自动释放 (drop)
+    };
 
-    // 提取配置信息并释放锁
     let (java_path, max_memory_config) = {
         let config = config_state.lock().unwrap();
         (config.java_path.clone(), config.max_memory)
-    }; // 锁在此处释放
+    };
 
-    if let Err(e) = ensure_authenticated(&user_uuid, &auth_type, &access_token, &auth_state).await {
+    if let Err(e) = ensure_authenticated(&user_uuid, &auth_type, &access_token, &auth_state, app.clone()).await {
         return Err(format!("认证失败: {}", e));
     }
 
@@ -170,7 +167,6 @@ pub async fn launch_minecraft(
         let current_os = std::env::consts::OS;
         let path_str = &lib.downloads.artifact.path;
 
-        // 操作系统过滤逻辑
         if current_os == "windows" && (path_str.contains("linux") || path_str.contains("macos")) { continue; }
         if current_os == "linux" && (path_str.contains("windows") || path_str.contains("macos")) { continue; }
         if current_os == "macos" && (path_str.contains("windows") || path_str.contains("linux")) { continue; }
@@ -237,7 +233,7 @@ pub async fn launch_minecraft(
         let injector_path = mc_dir.join("authlib-injector.jar");
         if injector_path.exists() {
             final_args.push(format!("-javaagent:{}={}", injector_path.to_string_lossy(), "https://littleskin.cn/api/yggdrasil"));
-            final_args.push(format!("-Dauthlibinjector.yggdrasil.prefetched={}", "ewogICAgIm1ldGEiOiB7...")); // 保持原 base64 字符串
+            final_args.push(format!("-Dauthlibinjector.yggdrasil.prefetched={}", "eyJtZXRhIjp7InNlcnZlck5hbWUiOiJMaXR0bGVTa2luIiwiaW1wbGVtZW50YXRpb25OYW1lIjoiWWdnZHJhc2lsIENvbm5lY3QiLCJpbXBsZW1lbnRhdGlvblZlcnNpb24iOiIwLjAuOCIsImxpbmtzIjp7ImFubm91bmNlbWVudCI6Imh0dHBzOi8vbGl0dGxlc2tpbi5jbi9hcGkvYW5ub3VuY2VtZW50cyIsImhvbWVwYWdlIjoiaHR0cHM6Ly9saXR0bGVza2luLmNuIiwicmVnaXN0ZXIiOiJodHRwczovL2xpdHRsZXNraW4uY24vYXV0aC9yZWdpc3RlciJ9LCJmZWF0dXJlLm5vbl9lbWFpbF9sb2dpbiI6dHJ1ZSwiZmVhdHVyZS5lbmFibGVfcHJvZmlsZV9rZXkiOnRydWUsImZlYXR1cmUub3BlbmlkX2NvbmZpZ3VyYXRpb25fdXJsIjoiaHR0cHM6Ly9vcGVuLmxpdHRsZXNraW4uY24vLndlbGwta25vd24vb3BlbmlkLWNvbmZpZ3VyYXRpb24ifSwic2tpbkRvbWFpbnMiOlsibGl0dGxlc2tpbi5jbiJdLCJzaWduYXR1cmVQdWJsaWNrZXkiOiItLS0tLUJFR0lOIFBVQkxJQyBLRVktLS0tLVxuTUlJQ0lqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FnOEFNSUlDQ2dLQ0FnRUFyR2NOT09GSXFMSlNxb0UzdTBoalxudE9Fbk9jRVQzd2o5RHJzczFCRTZzQnFnUG8wYk11bE9VTGhxamtjL3VIL3d5b3NZbnp3M3hhYXpKdDg3alRIaFxuSjhCUE14Q2VRTW95RWRSb1MzSm5qMUcwS2V6ajRBMmI2MVBKSk0xRHB2REFjcVFCWXNyU2RwQkorNTJNam9HU1xudkpvZVFPNVhVbEpWUW0yMS9IbUpucXNQaHpjQTZIZ1k3MVJIWUU1eG5ocFdKaVB4TEtVUHRtdDZDTllVUVFvU1xubzJ2MzZYV2dNbUxCWmhBYk5PUHhZWCsxaW94S2FtamhMTzI5VWh3dGdZOVU2UFdFTzcvU0JmWHp5UlBUemhQVlxuMm5IcTdLSnFkOElJcmx0c2x2NmkvNEZFTTgxaXZTL21tK1BOM2hZbElZSzZ6NlltaWkxbnJRQXBsc0o2N09HcVxuWUh0V0tPdnBmVHpPb2xsdWdzUmloa0FHNE9CNmhNMFByNDVqakMzVEljN2VPN2tPZ0ljR1VHVVFHdXV1Z0RFelxuSjFOOUZGV25OL0g2UDl1a0ZlZzVTbUdDNSt3bVVQWlpDdE5CTHI4bzhzSTVIN1FoSzdOZ3dDYUdGb1l1aUFHTFxuZ3ozay8zWXdKNDBCYndRYXlRMmdJcWVueitYT0ZJQWxhanYrL255ZmNEdlpIOXZHTktQOWxWY0hYVVQ1WVJuU1xuWlNIbzVsd3ZWcllVcnFFQWJoL3pEejhRTUV5aXVqV3ZVa1BoWnM5Zmg2ZmltVUd4dG04bUZJUEN0UEpWWGplWVxud0QzTHZ0M2FJQjFKSGRVVEpSM2VFYzRlSWFUS013TVB5SlJ6Vm41ektzaXRhWnozbm4vY09BL3daQzlvcXlFVVxubWM5aDZaTVJUUlVFRTRUdGFKeWc5bE1DQXdFQUFRPT1cbi0tLS0tRU5EIFBVQkxJQyBLRVktLS0tLVxuIn0="));
         }
     }
 

@@ -23,7 +23,7 @@
             <button @click="loginWithMicrosoft"
                     :disabled="isMsLoading"
                     class="w-full py-3.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-[11px] font-black tracking-[0.2em] transition-all active:scale-95 shadow-lg shadow-blue-100 disabled:bg-slate-200 disabled:shadow-none">
-              {{ isMsLoading ? '获取中' : '获取登录代码' }}
+              {{ isMsLoading ? '获取中' : '登录' }}
             </button>
           </template>
 

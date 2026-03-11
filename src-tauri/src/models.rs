@@ -54,6 +54,7 @@ pub struct UserInfo {
     pub name: String,
     pub uuid: String,
     pub access_token: String,
+    pub refresh_token: String,
     pub skin_url: String,
     pub auth_type: String,
 }
@@ -132,4 +133,24 @@ impl AuthState {
         let json = serde_json::to_string_pretty(self)?;
         fs::write(Self::file_path(), json)
     }
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct Manifest {
+    pub manifest_version: String,
+    pub version: String,
+    pub files: std::collections::HashMap<String, FileItem>,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+pub struct FileItem {
+    pub hash: String,
+    pub size: u64,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+pub struct ProgressPayload {
+    pub current: usize,
+    pub total: usize,
+    pub file: String,
 }

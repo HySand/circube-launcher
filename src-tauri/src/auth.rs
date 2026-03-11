@@ -44,6 +44,7 @@ pub async fn process_user_info(
         name: profile_name.to_string(),
         uuid: profile_id.to_string(),
         access_token: access_token.as_str().unwrap_or("").to_string(),
+        refresh_token: "".into(),
         skin_url,
         auth_type: "Yggdrasil".into(),
     })
@@ -94,10 +95,10 @@ pub async fn ms_login(
                 let body: serde_json::Value = r.json().await.unwrap_or_default();
 
                 if status.is_success() {
-                    let token = body["access_token"].as_str().unwrap_or("");
+                    let access_token = body["access_token"].as_str().unwrap_or("");
+                    let refresh_token = body["refresh_token"].as_str().unwrap_or("");
 
-                    // 关键点：不再传递 Arc，而是传递 handle
-                    if let Err(e) = authenticate_minecraft(token, handle.clone()).await {
+                    if let Err(e) = authenticate_minecraft(access_token, refresh_token, handle.clone()).await {
                         handle.emit("ms-login-error", format!("验证失败: {}", e)).unwrap();
                     }
                     break;
@@ -119,7 +120,8 @@ pub async fn ms_login(
 
 pub async fn authenticate_minecraft(
     ms_access_token: &str,
-    handle: tauri::AppHandle, // 只接收 handle
+    ms_refresh_token: &str,
+    handle: tauri::AppHandle,
 ) -> Result<McProfile, String> {
     let client = reqwest::Client::new();
 
@@ -176,7 +178,6 @@ pub async fn authenticate_minecraft(
             .unwrap_or_default();
     // --- Step 5: 获取状态并持久化 ---
     {
-        // 核心改动：从 handle 中获取状态。这能确保拿到的是 main 函数 manage 的那个唯一实例
         let state = handle.state::<Mutex<AuthState>>();
         let mut s = state.lock().map_err(|_| "Failed to acquire lock")?;
 
@@ -185,6 +186,7 @@ pub async fn authenticate_minecraft(
             uuid: profile.id.clone(),
             name: profile.name.clone(),
             access_token: mc_access_token.to_string(),
+            refresh_token: ms_refresh_token.to_string(),
             auth_type: "Microsoft".into(),
             skin_url,
         });
@@ -268,6 +270,7 @@ pub async fn ensure_authenticated(
     auth_type: &str,
     access_token: &str,
     state: &Mutex<AuthState>,
+    handle: tauri::AppHandle,
 ) -> Result<(), String> {
     let client = reqwest::Client::new();
 
@@ -289,7 +292,6 @@ pub async fn ensure_authenticated(
 
             if ref_res.status().is_success() {
                 let data: serde_json::Value = ref_res.json().await.map_err(|e| e.to_string())?;
-                // 调用你已有的处理逻辑
                 let updated_user = process_user_info(&client, &data["accessToken"], &data["selectedProfile"]).await?;
 
                 let mut s = state.lock().unwrap();
@@ -302,16 +304,60 @@ pub async fn ensure_authenticated(
             Err("YGGDRASIL_TOKEN_EXPIRED".into())
         },
         "Microsoft" => {
-            let prof_res = client.get("https://api.minecraftservices.com/minecraft/profile")
-                .bearer_auth(access_token)
-                .send().await.map_err(|e| e.to_string())?;
+                    let prof_res = client.get("https://api.minecraftservices.com/minecraft/profile")
+                        .bearer_auth(access_token)
+                        .send().await.map_err(|e| e.to_string())?;
 
-            if prof_res.status().is_success() {
-                Ok(())
-            } else {
-                Err("MS_TOKEN_EXPIRED".into())
-            }
-        },
-        _ => Ok(()),
+                    if prof_res.status().is_success() {
+                        return Ok(());
+                    }
+
+                    println!("[Auth] Microsoft Access Token expired, attempting silent refresh...");
+
+                    let current_refresh_token = {
+                        let s = state.lock().unwrap();
+                        s.users.iter()
+                            .find(|u| u.uuid == uuid)
+                            .map(|u| u.refresh_token.clone())
+                            .ok_or("User credential not found in state")?
+                    };
+
+                    let (new_ms_access, new_ms_refresh) = refresh_ms_token(&current_refresh_token).await
+                        .map_err(|_| "MS_TOKEN_EXPIRED".to_string())?;
+
+                    authenticate_minecraft(&new_ms_access, &new_ms_refresh, handle).await?;
+
+                    Ok(())
+                },
+                _ => Ok(()),
     }
+}
+
+pub async fn refresh_ms_token(refresh_token: &str) -> Result<(String, String), String> {
+    let client = reqwest::Client::new();
+    let url = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
+
+    let params = [
+        ("client_id", CLIENT_ID),
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+        ("scope", "XboxLive.signin offline_access"),
+    ];
+
+    let res = client.post(url)
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| format!("MS Refresh Network Error: {}", e))?;
+
+    let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+
+    if let Some(err) = data["error"].as_str() {
+        return Err(format!("MS Refresh OAuth Error: {}", err));
+    }
+
+    let new_access = data["access_token"].as_str().ok_or("No access token")?;
+    let new_refresh = data["refresh_token"].as_str().unwrap_or(refresh_token);
+
+    Ok((new_access.to_string(), new_refresh.to_string()))
 }

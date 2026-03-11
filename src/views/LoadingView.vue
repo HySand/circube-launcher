@@ -1,18 +1,25 @@
 <template>
-  <div class="h-full flex items-center justify-center bg-white animate-fade-in">
-      <Spinner class="text-blue-700"/>
+  <div class="h-full flex flex-col items-center justify-center bg-white animate-fade-in gap-4">
+    <Spinner class="text-blue-700"/>
+
+    <p class="text-sm text-gray-500 font-medium tracking-tight animate-pulse min-h-[1.25rem]">
+      {{ statusText }}
+    </p>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted } from "vue"
+import { ref, onMounted, onUnmounted } from "vue"
 import { useRouter } from "vue-router"
 import { useCacheStore } from '@/stores/cache'
 import { invoke } from "@tauri-apps/api/core";
 import { Spinner } from "@/components/ui/spinner"
+import { listen, UnlistenFn } from '@tauri-apps/api/event';
 
 const router = useRouter()
 const cache = useCacheStore()
+const statusText = ref("正在启动启动器...");
+let unlisten: UnlistenFn;
 
 const fetchQuote = async () => {
   try {
@@ -30,8 +37,16 @@ interface JavaInfo { path: string; version: string }
 
 onMounted(async () => {
   fetchQuote();
+  unlisten = await listen<{ current: number; total: number; file: string }>(
+      'download-progress',
+      (event) => {
+        const { current, total } = event.payload;
+        statusText.value = `正在更新资源文件 (${current}/${total})`;
+      }
+  );
+
   try {
-    // 第一步：只拿核心配置和用户信息（速度极快）
+    statusText.value = "正在加载核心配置...";
     const [currentUser, savedConfig, totalMemory] = await Promise.all([
       invoke<UserInfo | null>('get_current_user'),
       invoke<Config>('get_config'),
@@ -42,11 +57,9 @@ onMounted(async () => {
     cache.setSettings(savedConfig);
     if (currentUser) cache.setUser(currentUser);
 
-    // 第二步：判断是否需要执行 Java 扫描
+    statusText.value = "正在校验 JAVA 可用性...";
     const checkJavaAndProceed = async () => {
       let isJavaReady = false;
-
-      // 场景 A: 存在保存的路径 -> 执行轻量级验证
       if (savedConfig.javaPath && savedConfig.javaPath.trim() !== "") {
         try {
           const validInfo = await invoke<JavaInfo>('validate_java', { path: savedConfig.javaPath });
@@ -58,7 +71,6 @@ onMounted(async () => {
         }
       }
 
-      // 场景 B: 路径不存在或验证失败 -> 执行全量扫描
       if (!isJavaReady) {
         invoke<JavaInfo[]>('scan_java_environments').then(async (list) => {
           if (list && list.length > 0) {
@@ -73,13 +85,32 @@ onMounted(async () => {
       }
     };
 
-    // 执行 Java 检查逻辑（不 await，避免阻塞跳转）
     await checkJavaAndProceed();
 
-    await router.replace(currentUser ? "/main" : "/login");
+    try {statusText.value = "更新检查...";
+      await invoke('sync_versions');
+
+      statusText.value = "更新检查完成...";
+    } catch (e) {
+      console.error("更新失败:", e);
+      statusText.value = "更新失败，尝试跳过...";
+      setTimeout(async () => {
+        await router.replace(currentUser ? "/main" : "/login");
+      }, 500);
+      return;
+    }
+
+    statusText.value = "准备就绪...";
+    setTimeout(async () => {
+      await router.replace(currentUser ? "/main" : "/login");
+    }, 500);
   } catch (error) {
     console.error("[Boot] Initialization failed:", error);
     await router.replace("/login");
   }
+});
+
+onUnmounted(() => {
+  if (unlisten) unlisten();
 });
 </script>

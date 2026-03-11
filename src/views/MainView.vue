@@ -90,6 +90,7 @@ onMounted(async () => {
       skin: skinUrl.value
     });
     container.value.appendChild(viewer.canvas);
+    viewer.controls.enableZoom = false;
     viewer.animation = new skinview3d.IdleAnimation();
   }
 
