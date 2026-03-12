@@ -66,12 +66,12 @@ pub async fn scan_java_environments() -> Vec<JavaInfo> {
         ("which", "java")
     };
 
-    // 执行系统搜索指令 (where / which -a)
+    // 执行系统搜索指令
     let mut cmd = Command::new(search_cmd);
     #[cfg(windows)]
-        {
-            cmd.creation_flags(0x08000000);
-        }
+    {
+        cmd.creation_flags(0x08000000);
+    }
     if !cfg!(windows) { cmd.arg("-a"); }
     cmd.arg(target_bin);
 
@@ -83,9 +83,9 @@ pub async fn scan_java_environments() -> Vec<JavaInfo> {
         }
     }
 
-    // 2. 补充：通过系统特定环境变量探测 (JAVA_HOME)
+    // 2. 通过系统特定环境变量探测 (JAVA_HOME)
     if let Ok(java_home) = std::env::var("JAVA_HOME") {
-        let bin_name = if cfg!(windows) { "javaw.exe" } else { "java" };
+        let bin_name = if cfg!(windows) { "java.exe" } else { "java" };
         let p = PathBuf::from(java_home).join("bin").join(bin_name);
         if p.exists() { found_paths.insert(p); }
     }
@@ -113,7 +113,6 @@ pub async fn scan_java_environments() -> Vec<JavaInfo> {
     for path in found_paths {
         let path_str = path.to_string_lossy().to_string();
 
-        // 无论 Windows 下是 javaw 还是 java，获取版本号的参数是一致的
         if let Ok(out) = Command::new(&path).arg("-version").output() {
             let full_text = format!(
                 "{}\n{}",

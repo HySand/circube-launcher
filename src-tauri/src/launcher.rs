@@ -8,6 +8,8 @@ use sysinfo::System;
 use tauri::{AppHandle, Emitter, State};
 use crate::utils::validate_java;
 use crate::auth::ensure_authenticated;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 #[derive(Deserialize)]
 pub struct VersionConfig {
@@ -270,9 +272,16 @@ pub async fn launch_minecraft(
 
     emit_progress("正在启动 JVM...");
 
-    let mut child = Command::new(java_path)
-        .args(&final_args)
-        .current_dir(&mc_dir)
+    let mut cmd = Command::new(java_path);
+    cmd.args(&final_args)
+       .current_dir(&mc_dir);
+
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(0x08000000);
+    }
+
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("Launch failed: {}", e))?;
 
