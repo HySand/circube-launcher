@@ -115,21 +115,43 @@ pub async fn sync_versions(app_handle: tauri::AppHandle) -> Result<(), String> {
                 let dest = b_dir.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
 
                 async move {
-                    if let Some(parent) = dest.parent() {
-                        fs::create_dir_all(parent).await.ok();
+                    let mut attempts = 0;
+                    let max_retries = 3;
+
+                    loop {
+                        let result = async {
+                            if let Some(parent) = dest.parent() {
+                                fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
+                            }
+
+                            let resp = c.get(&final_url).send().await.map_err(|e| e.to_string())?;
+                            if !resp.status().is_success() {
+                                return Err(format!("HTTP {}", resp.status()));
+                            }
+
+                            let data = resp.bytes().await.map_err(|e| e.to_string())?;
+                            fs::write(&dest, data).await.map_err(|e| e.to_string())?;
+                            Ok::<(), String>(())
+                        }.await;
+
+                        match result {
+                            Ok(_) => {
+                                let current = cnt.fetch_add(1, Ordering::SeqCst) + 1;
+                                let _ = h.emit("download-progress", ProgressPayload {
+                                    current,
+                                    total,
+                                    file: path.clone()
+                                });
+                                return Ok(());
+                            }
+                            Err(e) if attempts < max_retries => {
+                                attempts += 1;
+                                eprintln!("下载失败: {}, 正在进行第 {} 次重试. 错误: {}", path, attempts, e);
+                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                            }
+                            Err(e) => return Err(format!("文件 {} 在 {} 次重试后仍然失败: {}", path, max_retries, e)),
+                        }
                     }
-
-                    let resp = c.get(&final_url).send().await.map_err(|e| e.to_string())?;
-                    if !resp.status().is_success() {
-                        return Err(format!("下载失败: {}, 状态: {}", path, resp.status()));
-                    }
-
-                    let data = resp.bytes().await.map_err(|e| e.to_string())?;
-                    fs::write(dest, data).await.map_err(|e| e.to_string())?;
-
-                    let current = cnt.fetch_add(1, Ordering::SeqCst) + 1;
-                    h.emit("download-progress", ProgressPayload { current, total, file: path }).ok();
-                    Ok::<(), String>(())
                 }
             })
         ).buffer_unordered(5);
