@@ -11,10 +11,10 @@ set /p "MANIFEST_VER=请输入清单版本号 (manifest_version): "
 if "%MANIFEST_VER%"=="" goto :input_manifest_ver
 
 :input_app_ver
-set /p "APP_VER=请输入当前版本号 (version): "
+set /p "APP_VER=请输入当前版本名 (version): "
 if "%APP_VER%"=="" goto :input_app_ver
 
-set "TARGET_DIR=.minecraft\versions"
+set "TARGET_DIR=.minecraft"
 set "OUTPUT_FILE=manifest.json"
 
 echo [System] 正在扫描: %TARGET_DIR%...

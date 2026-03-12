@@ -9,7 +9,7 @@ use tauri::{Emitter};
 use walkdir::WalkDir;
 
 const REMOTE_MANIFEST_URL: &str = "https://drive.atmospherium.space/public/updater/manifest.json";
-const DOWNLOAD_BASE_URL: &str   = "https://drive.atmospherium.space/public/updater/.minecraft/versions/";
+const DOWNLOAD_BASE_URL: &str   = "https://drive.atmospherium.space/public/updater/.minecraft/";
 
 #[tauri::command]
 pub async fn sync_versions(app_handle: tauri::AppHandle) -> Result<(), String> {
@@ -20,8 +20,8 @@ pub async fn sync_versions(app_handle: tauri::AppHandle) -> Result<(), String> {
         .ok_or("Failed to get parent dir")?
         .to_path_buf();
 
-    let base_dir = exe_path.join(".minecraft").join("versions");
-    let local_manifest_path = base_dir.join("manifest.json");
+    let base_dir = exe_path.join(".minecraft");
+    let local_manifest_path = exe_path.join("launcher").join("manifest.json");
 
     let mut final_version_dir = String::from("UNKNOWN");
 
@@ -36,17 +36,11 @@ pub async fn sync_versions(app_handle: tauri::AppHandle) -> Result<(), String> {
     }
 
     // 3. 第二阶段：网络请求获取远程清单
-    let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = reqwest::Client::new();
 
-    // 注意：这里如果请求失败，我们将使用本地保底版本并尽早退出
     let response = match client.get(REMOTE_MANIFEST_URL).send().await {
         Ok(res) => res,
         Err(e) => {
-            // 网络失败，尝试写入本地保底值到 OnceLock 并返回错误
             let _ = VERSION.set(final_version_dir);
             return Err(format!("网络请求失败，已恢复本地版本配置: {}", e));
         }
@@ -60,7 +54,6 @@ pub async fn sync_versions(app_handle: tauri::AppHandle) -> Result<(), String> {
     let text = response.text().await.map_err(|e| e.to_string())?;
     let remote_manifest: Manifest = serde_json::from_str(&text).map_err(|e| e.to_string())?;
 
-    // 远程获取成功，覆盖局部变量
     final_version_dir = remote_manifest.version.clone();
 
     let _ = VERSION.set(final_version_dir.clone());
@@ -151,7 +144,7 @@ pub async fn sync_versions(app_handle: tauri::AppHandle) -> Result<(), String> {
         .map(|k| k.replace('\\', "/"))
         .collect();
 
-    let mods_dir = base_dir.join(&final_version_dir).join("mods");
+    let mods_dir = base_dir.join("versions").join(&final_version_dir).join("mods");
 
     if mods_dir.exists() {
         for entry in WalkDir::new(&mods_dir).into_iter().filter_map(|e| e.ok()) {

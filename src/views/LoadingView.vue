@@ -88,7 +88,7 @@ onMounted(async () => {
 
     await checkJavaAndProceed();
 
-    try {statusText.value = "更新检查...";
+    try {statusText.value = "正在检查更新...";
       await invoke('sync_versions');
     } catch (e) {
       console.error("更新失败:", e);
