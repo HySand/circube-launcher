@@ -140,7 +140,7 @@ onMounted(async () => {
     const msg = typeof event.payload === 'string' ? event.payload : event.payload.message
     msLoadingText.value = msg
     if (msg.includes("错误")) {
-      toast.error(msg)
+      toast.error(msg, { duration: 1500 })
       isMsLoading.value = false
       deviceCode.value = ""
     }
@@ -149,14 +149,14 @@ onMounted(async () => {
   unlistenSuccess = await listen<any>('ms-login-success', () => {
     isMsLoading.value = false
     deviceCode.value = ""
-    toast.success("微软登录成功！")
+    toast.success("微软登录成功！", { duration: 1500 })
     router.push('/')
   })
 
   unlistenSuccess = await listen<any>('ms-login-error', () => {
     isMsLoading.value = false
     deviceCode.value = ""
-    toast.error("微软登录失败！")
+    toast.error("微软登录失败！", { duration: 1500 })
     router.push('/')
   })
 })
@@ -169,7 +169,7 @@ onUnmounted(() => {
 const copyToClipboard = async (text: string) => {
   try {
     await navigator.clipboard.writeText(text);
-    toast.success("代码已重新复制");
+    toast.success("代码已重新复制", { duration: 1500 });
   } catch (err) {
     console.error("Clipboard error: ", err);
   }
@@ -188,12 +188,12 @@ const loginWithMicrosoft = async () => {
   }
   catch (err) {
     isMsLoading.value = false;
-    toast.error("初始化失败: " + err);
+    toast.error("初始化失败: " + err, { duration: 1500 });
   }
 };
 
 const loginWithYggdrasil = async () => {
-  if (!authForm.email || !authForm.password) { toast.error("请输入账号密码"); return; }
+  if (!authForm.email || !authForm.password) { toast.error("请输入账号密码", { duration: 1500 }); return; }
   isLoading.value = true
   try {
     const res = await invoke<AuthResponse>('yggdrasil_login', { payload: { ...authForm } })
@@ -204,7 +204,7 @@ const loginWithYggdrasil = async () => {
       showProfileSelector.value = true
     }
   } catch (err: any) {
-    toast.error("登录失败: " + err)
+    toast.error("登录失败: " + err, { duration: 1500 })
   } finally { isLoading.value = false; }
 }
 
@@ -220,7 +220,7 @@ const selectProfile = async (profile: any) => {
       }
     })
     await router.push('/')
-  } catch (err) { toast.error("角色选择失败: " + err); }
+  } catch (err) { toast.error("角色选择失败: " + err, { duration: 1500 }); }
   finally { isLoading.value = false; }
 }
 

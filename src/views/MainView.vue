@@ -124,7 +124,7 @@ const handleLaunch = async () => {
     await invoke("launch_minecraft");
   } catch (e) {
     if (String(e).includes("TOKEN_EXPIRED")) {
-      toast.error("账户已过期，请重新登录");
+      toast.error("账户已过期，请重新登录", { duration: 1500 });
       await invoke('logout_current_user')
       await router.push("/");
     }

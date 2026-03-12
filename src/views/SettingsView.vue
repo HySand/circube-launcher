@@ -179,7 +179,7 @@ const handleSliderChange = (val: number[] | undefined) => {
 const handleManualToggle = async () => {
   if (isManualMem.value) {
     await triggerSave()
-    toast.success("内存已保存", { duration: 1000 })
+    toast.success("内存已保存", { duration: 1500 })
   }
   isManualMem.value = !isManualMem.value
 }
@@ -189,7 +189,7 @@ const autoTuneMemory = async () => {
   try {
     await performAutoTune()
     await triggerSave(0)
-    toast.success("已自动优化", { duration: 1000 })
+    toast.success("已自动优化", { duration: 1500 })
   } finally {
     isTuning.value = false
   }

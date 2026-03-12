@@ -94,7 +94,7 @@ onMounted(async () => {
       console.error("更新失败:", e);
       statusText.value = "更新失败，尝试跳过...";
       await router.replace(currentUser ? "/main" : "/login");
-      toast.error("更新失败");
+      toast.error("更新失败", { duration: 1500 });
       return;
     }
 
