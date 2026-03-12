@@ -150,7 +150,7 @@ pub async fn launch_minecraft(
         .to_path_buf();
     let mc_dir = base_dir.join(".minecraft");
 
-    let version_name = "CirCube Zero";
+    let version_name = VERSION.get().map(|s| s.as_str()).unwrap_or("UNKNOWN");
     let version_json_path = mc_dir.join(format!("versions/{0}/{0}.json", version_name));
     let raw_json = fs::read_to_string(&version_json_path)
         .map_err(|_| format!("Missing {}.json", version_name))?;

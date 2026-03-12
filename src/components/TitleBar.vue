@@ -1,5 +1,5 @@
 <template>
-  <div data-tauri-drag-region class="h-10 w-full flex justify-between items-center px-4 bg-white/80 backdrop-blur-md absolute top-0 z-50">
+  <div data-tauri-drag-region class="h-10 w-full flex justify-between items-center px-4 bg-white absolute top-0 z-50">
     <div class="flex items-center gap-2 pointer-events-none">
       <img src="@/assets/circube.svg" class="w-3 h-3 translate-y-[-0.5px]" alt="Logo" />
       <span class="text-[10px] font-black text-slate-400 uppercase tracking-widest">CirCube Launcher</span>

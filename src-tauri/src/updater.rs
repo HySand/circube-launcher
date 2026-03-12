@@ -13,41 +13,59 @@ const DOWNLOAD_BASE_URL: &str   = "https://drive.atmospherium.space/public/updat
 
 #[tauri::command]
 pub async fn sync_versions(app_handle: tauri::AppHandle) -> Result<(), String> {
-    // 1. 获取基础目录
+    // 1. 基础路径准备
     let exe_path = std::env::current_exe()
         .map_err(|e| e.to_string())?
         .parent()
         .ok_or("Failed to get parent dir")?
         .to_path_buf();
 
-    // 确保 base_dir 路径风格统一
     let base_dir = exe_path.join(".minecraft").join("versions");
     let local_manifest_path = base_dir.join("manifest.json");
 
+    let mut final_version_dir = String::from("UNKNOWN");
+
+    // 2. 第一阶段：尝试从本地清单读取保底版本
+    if local_manifest_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&local_manifest_path) {
+            if let Ok(local_manifest) = serde_json::from_str::<Manifest>(&content) {
+                final_version_dir = local_manifest.version;
+                println!("本地版本: {} ver {}", final_version_dir, local_manifest.manifest_version);
+            }
+        }
+    }
+
+    // 3. 第二阶段：网络请求获取远程清单
     let client = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         .connect_timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| e.to_string())?;
 
-    // 2. 获取远程清单
-    let response = client
-        .get(REMOTE_MANIFEST_URL)
-        .send()
-        .await
-        .map_err(|e| format!("网络请求失败: {}", e))?;
+    // 注意：这里如果请求失败，我们将使用本地保底版本并尽早退出
+    let response = match client.get(REMOTE_MANIFEST_URL).send().await {
+        Ok(res) => res,
+        Err(e) => {
+            // 网络失败，尝试写入本地保底值到 OnceLock 并返回错误
+            let _ = VERSION.set(final_version_dir);
+            return Err(format!("网络请求失败，已恢复本地版本配置: {}", e));
+        }
+    };
 
     if !response.status().is_success() {
-        return Err(format!("服务器拒绝请求: {}", response.status()));
+        let _ = VERSION.set(final_version_dir);
+        return Err(format!("服务器返回错误状态码: {}", response.status()));
     }
 
-    let text = response.text().await.map_err(|e| format!("读取内容失败: {}", e))?;
-    let remote_manifest: Manifest = serde_json::from_str(&text)
-        .map_err(|e| format!("清单解析失败: {}", e))?;
+    let text = response.text().await.map_err(|e| e.to_string())?;
+    let remote_manifest: Manifest = serde_json::from_str(&text).map_err(|e| e.to_string())?;
 
-    let current_version_dir = remote_manifest.version.clone();
+    // 远程获取成功，覆盖局部变量
+    final_version_dir = remote_manifest.version.clone();
 
-    // 3. 版本对比
+    let _ = VERSION.set(final_version_dir.clone());
+
+    // 4. 版本对比逻辑
     let mut needs_sync = true;
     if local_manifest_path.exists() {
         if let Ok(content) = fs::read_to_string(&local_manifest_path).await {
@@ -60,11 +78,11 @@ pub async fn sync_versions(app_handle: tauri::AppHandle) -> Result<(), String> {
     }
 
     if !needs_sync {
-        println!("版本已是最新，跳过同步。");
+        println!("版本已是最新 ({} ver {})，跳过下载。", final_version_dir, remote_manifest.manifest_version);
         return Ok(());
     }
 
-    // 4. 构建下载队列并预处理路径
+    // 5. 构建下载队列
     let mut download_queue = Vec::new();
     for (rel_path, info) in &remote_manifest.files {
         if rel_path.contains("options.txt") { continue; }
@@ -74,7 +92,6 @@ pub async fn sync_versions(app_handle: tauri::AppHandle) -> Result<(), String> {
         let file_needs_update = if !local_path.exists() {
             true
         } else {
-            // 注意：对于大文件，fs::read 可能占用大量内存，此处为简化逻辑
             let content = fs::read(&local_path).await.map_err(|e| e.to_string())?;
             let mut hasher = Sha1::new();
             hasher.update(&content);
@@ -86,73 +103,63 @@ pub async fn sync_versions(app_handle: tauri::AppHandle) -> Result<(), String> {
         }
     }
 
-    // 5. 执行下载任务
+    // 6. 执行并发下载任务
     if !download_queue.is_empty() {
         let total = download_queue.len();
         let counter = Arc::new(AtomicUsize::new(0));
 
         let fetches = futures::stream::iter(
-                    download_queue.into_iter().map(|path| {
-                        let c = client.clone();
-                        let h = app_handle.clone();
-                        let cnt = counter.clone();
-                        let b_dir = base_dir.clone();
+            download_queue.into_iter().map(|path| {
+                let c = client.clone();
+                let h = app_handle.clone();
+                let cnt = counter.clone();
+                let b_dir = base_dir.clone();
 
-                        let normalized_path = path.replace('\\', "/").trim_start_matches('/').to_string();
+                let normalized_path = path.replace('\\', "/").trim_start_matches('/').to_string();
+                let base_url = DOWNLOAD_BASE_URL.trim_end_matches('/').to_string();
+                let final_url = format!("{}/{}", base_url, normalized_path).replace(' ', "%20");
 
-                        let base_url = DOWNLOAD_BASE_URL.trim_end_matches('/').to_string();
-                        let url_string = format!("{}/{}", base_url, normalized_path);
+                let dest = b_dir.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
 
-                        let final_url = url_string.replace(' ', "%20");
+                async move {
+                    if let Some(parent) = dest.parent() {
+                        fs::create_dir_all(parent).await.ok();
+                    }
 
-                        let dest = b_dir.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
+                    let resp = c.get(&final_url).send().await.map_err(|e| e.to_string())?;
+                    if !resp.status().is_success() {
+                        return Err(format!("下载失败: {}, 状态: {}", path, resp.status()));
+                    }
 
-                        async move {
-                            if let Some(parent) = dest.parent() {
-                                fs::create_dir_all(parent).await.ok();
-                            }
+                    let data = resp.bytes().await.map_err(|e| e.to_string())?;
+                    fs::write(dest, data).await.map_err(|e| e.to_string())?;
 
-                            let resp = c.get(&final_url).send().await.map_err(|e| e.to_string())?;
-
-                            if !resp.status().is_success() {
-                                return Err(format!("下载失败: {}, 状态码: {}\n最终URL: {}", path, resp.status(), final_url));
-                            }
-
-                            let data = resp.bytes().await.map_err(|e| e.to_string())?;
-                            fs::write(dest, data).await.map_err(|e| e.to_string())?;
-
-                            let current = cnt.fetch_add(1, Ordering::SeqCst) + 1;
-                            h.emit("download-progress", ProgressPayload { current, total, file: path }).ok();
-                            Ok::<(), String>(())
-                        }
-                    })
-                ).buffer_unordered(3);
+                    let current = cnt.fetch_add(1, Ordering::SeqCst) + 1;
+                    h.emit("download-progress", ProgressPayload { current, total, file: path }).ok();
+                    Ok::<(), String>(())
+                }
+            })
+        ).buffer_unordered(5);
 
         let results: Vec<_> = fetches.collect().await;
         for res in results { res?; }
     }
 
-    // 6. 针对性清理 mods 目录
+    // 7. 清理 mods 目录
     let remote_mods_set: std::collections::HashSet<String> = remote_manifest.files.keys()
         .filter(|k| k.contains("/mods/"))
         .map(|k| k.replace('\\', "/"))
         .collect();
 
-    let mods_dir = base_dir.join(&current_version_dir).join("mods");
+    let mods_dir = base_dir.join(&final_version_dir).join("mods");
 
     if mods_dir.exists() {
-        println!("正在清理冗余 Mods...");
         for entry in WalkDir::new(&mods_dir).into_iter().filter_map(|e| e.ok()) {
             if entry.file_type().is_file() {
                 let local_file_path = entry.path();
-
-                // 计算相对于 base_dir 的路径，用于比对清单
                 if let Ok(rel_path) = local_file_path.strip_prefix(&base_dir) {
                     let rel_path_str = rel_path.to_string_lossy().replace('\\', "/");
-
-                    // 如果本地存在但远程没有，则删除
                     if !remote_mods_set.contains(&rel_path_str) {
-                        println!("🗑️ 删除多余 Mod: {}", rel_path_str);
                         let _ = std::fs::remove_file(local_file_path);
                     }
                 }
@@ -160,9 +167,9 @@ pub async fn sync_versions(app_handle: tauri::AppHandle) -> Result<(), String> {
         }
     }
 
-    // 7. 保存清单
+    // 8. 保存新清单
     save_local_manifest(&local_manifest_path, &remote_manifest).await?;
-    println!("同步完成！");
+    println!("同步完成，当前版本: {}", final_version_dir);
     Ok(())
 }
 

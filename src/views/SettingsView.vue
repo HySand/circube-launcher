@@ -65,17 +65,17 @@
 
         <div class="grid grid-cols-3 gap-2 px-1">
           <div class="flex flex-col gap-2">
-            <Badge variant="secondary" class="w-fit bg-slate-100 text-blue-700 hover:bg-slate-100 px-1.5 py-0 text-[8px] font-black tracking-[0.1em] rounded-md shadow-none border-none">系统内存</Badge>
+            <Badge variant="secondary" class="w-fit bg-slate-100 text-blue-700 hover:bg-slate-100 px-1.5 py-0 text-[9px] tracking-[0.1em] rounded-md shadow-none border-none">系统内存</Badge>
             <span class="text-blue-800 font-numeric font-bold text-[11px] ml-0.5">{{ (totalSystemMem / 1024).toFixed(1) }} <small class="opacity-50">GB</small></span>
           </div>
 
           <div class="flex flex-col items-center gap-2">
-            <Badge class="bg-blue-50 text-blue-600 hover:bg-blue-50 px-1.5 py-0 text-[8px] font-black tracking-[0.1em] rounded-md shadow-none border-none">游戏分配</Badge>
+            <Badge class="bg-blue-50 text-blue-600 hover:bg-blue-50 px-1.5 py-0 text-[9px] tracking-[0.1em] rounded-md shadow-none border-none">游戏分配</Badge>
             <span class="text-blue-700 font-numeric font-bold text-[11px]">{{ config.maxMemory }} <small class="opacity-50">MB</small></span>
           </div>
 
           <div class="flex flex-col items-end gap-2">
-            <Badge variant="secondary" class="bg-green-50/50 text-green-600 border-green-100 px-1.5 py-0 text-[8px] font-black tracking-[0.1em] rounded-md shadow-none">剩余内存</Badge>
+            <Badge variant="secondary" class="bg-green-50/50 text-green-600 border-green-100 px-1.5 py-0 text-[9px] tracking-[0.1em] rounded-md shadow-none">剩余内存</Badge>
             <span class="text-slate-600 font-numeric font-bold text-[11px] mr-0.5">{{ (freeMemAfterAlloc / 1024).toFixed(1) }} <small class="opacity-50">GB</small></span>
           </div>
         </div>

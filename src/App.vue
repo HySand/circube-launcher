@@ -1,10 +1,8 @@
 <template>
-  <div
-      class="w-screen h-screen overflow-hidden rounded-2xl border relative flex flex-col
-             bg-background text-foreground border-border">
+  <div class="w-screen h-screen overflow-hidden rounded-2xl border relative flex flex-col border-border">
     <TitleBar/>
     <Toaster richColors position="top-center" :duration="1500"/>
-    <div class="flex-1 pt-10 overflow-y-auto">
+    <div class="flex-1 pt-10 overflow-y-auto" >
       <router-view />
     </div>
   </div>
@@ -27,12 +25,6 @@ import 'vue-sonner/style.css'
   border-radius: 16px !important;
   /* 调整投影，更具悬浮感 */
   box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05), 0 8px 10px -6px rgba(0, 0, 0, 0.05) !important;
-}
-
-/* 适配暗色模式 */
-.dark [data-sonner-toast] {
-  background-color: rgba(15, 23, 42, 0.8) !important; /* slate-900 */
-  border-color: rgba(30, 41, 59, 0.5) !important;    /* slate-800 */
 }
 
 /* 3. 修复 richColors 开启时的遮盖问题 */

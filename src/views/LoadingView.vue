@@ -15,6 +15,7 @@ import { useCacheStore } from '@/stores/cache'
 import { invoke } from "@tauri-apps/api/core";
 import { Spinner } from "@/components/ui/spinner"
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
+import { toast } from 'vue-sonner';
 
 const router = useRouter()
 const cache = useCacheStore()
@@ -89,21 +90,18 @@ onMounted(async () => {
 
     try {statusText.value = "更新检查...";
       await invoke('sync_versions');
-
-      statusText.value = "更新检查完成...";
     } catch (e) {
       console.error("更新失败:", e);
       statusText.value = "更新失败，尝试跳过...";
-      setTimeout(async () => {
-        await router.replace(currentUser ? "/main" : "/login");
-      }, 500);
+      await router.replace(currentUser ? "/main" : "/login");
+      toast.error("更新失败");
       return;
     }
 
     statusText.value = "准备就绪...";
     setTimeout(async () => {
       await router.replace(currentUser ? "/main" : "/login");
-    }, 500);
+    }, 300);
   } catch (error) {
     console.error("[Boot] Initialization failed:", error);
     await router.replace("/login");

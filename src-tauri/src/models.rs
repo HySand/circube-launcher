@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 #[derive(Deserialize)]
 pub struct AuthPayload {
@@ -154,3 +155,5 @@ pub struct ProgressPayload {
     pub total: usize,
     pub file: String,
 }
+
+pub static VERSION: OnceLock<String> = OnceLock::new();

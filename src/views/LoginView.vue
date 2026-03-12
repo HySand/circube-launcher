@@ -6,18 +6,18 @@
         <div class="flex items-center justify-between mb-4">
           <div class="flex items-center gap-2">
             <div class="w-1.5 h-1.5 bg-blue-500 rounded-full shadow-[0_0_8px_rgba(59,130,246,0.5)]"></div>
-            <p class="text-[10px] font-black text-slate-800 uppercase tracking-widest">正版</p>
+            <p class="text-[11px] font-black text-slate-800 uppercase tracking-widest">正版</p>
           </div>
-          <span class="text-[8px] text-slate-300 font-bold uppercase tracking-widest leading-none">MS-OAuth2</span>
+          <span class="text-[9px] text-slate-300 font-bold uppercase tracking-widest leading-none">MS-OAuth2</span>
         </div>
 
         <div class="flex-1 flex flex-col justify-center items-center min-h-[130px]">
           <template v-if="!deviceCode">
-            <div class="w-9 h-9 bg-white rounded-xl flex items-center justify-center shadow-sm border border-slate-50 group-hover:scale-105 transition-all duration-500">
+            <div class="w-8 h-8 bg-white rounded-xl flex items-center justify-center shadow-sm border border-slate-50 transition-all duration-500">
               <svg viewBox="0 0 23 23" class="w-4 h-4"><path fill="#f3f3f3" d="M0 0h23v23H0z"/><path fill="#f35325" d="M1 1h10v10H1z"/><path fill="#81bc06" d="M12 1h10v10H12z"/><path fill="#05a6f0" d="M1 12h10v10H1z"/><path fill="#ffba08" d="M12 12h10v10H12z"/></svg>
             </div>
             <div class="text-center mt-3 mb-5">
-              <p class="text-[11px] font-black text-slate-600 uppercase tracking-tighter">微软账号</p>
+              <p class="text-[11px] text-slate-600 uppercase tracking-tighter">微软账号</p>
               <p class="text-[9px] text-slate-400 mt-0.5 font-medium">正版用户使用此方式</p>
             </div>
             <button @click="loginWithMicrosoft"
@@ -42,7 +42,7 @@
             <div class="flex flex-col items-center gap-2 pt-2">
               <p class="text-[7px] text-slate-400 font-medium">请在自动打开的页面中输入验证码</p>
               <button @click="deviceCode = ''; isMsLoading = false"
-                      class="px-4 py-1 text-[8px] font-black text-slate-300 hover:text-blue-500 border border-transparent hover:border-blue-100 rounded-full uppercase transition-all tracking-tighter">
+                      class="px-4 py-1 text-[9px] font-black text-slate-300 hover:text-blue-500 border border-transparent hover:border-blue-100 rounded-full uppercase transition-all tracking-tighter">
                 重新获取 ←
               </button>
             </div>
@@ -54,9 +54,9 @@
         <div class="flex items-center justify-between mb-4">
           <div class="flex items-center gap-2">
             <div class="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)]"></div>
-            <p class="text-[10px] font-black text-slate-800 uppercase tracking-widest">离线</p>
+            <p class="text-[11px] font-black text-slate-800 uppercase tracking-widest">离线</p>
           </div>
-          <span class="text-[8px] text-slate-300 font-bold uppercase tracking-widest leading-none">Yggdrasil</span>
+          <span class="text-[9px] text-slate-300 font-bold uppercase tracking-widest leading-none">Yggdrasil</span>
         </div>
 
         <div class="flex-1 relative min-h-[130px]">
@@ -93,7 +93,7 @@
                 <span class="text-[9px] font-bold text-slate-600 truncate">{{ profile.name }}</span>
               </button>
             </div>
-            <button @click="showProfileSelector = false" class="w-full py-1 text-[8px] font-black text-slate-300 hover:text-slate-500 uppercase transition-colors shrink-0">
+            <button @click="showProfileSelector = false" class="w-full py-1 text-[8px] text-slate-300 hover:text-slate-500 uppercase transition-colors shrink-0">
               返回
             </button>
           </div>
@@ -103,9 +103,6 @@
 
     <div class="mt-4 flex justify-between items-center px-2 shrink-0">
       <span class="text-[8px] text-slate-200 font-bold uppercase tracking-[0.2em]">MADE BY ZEPHYR</span>
-      <button @click="router.push('/main')" class="text-[8px] font-black text-slate-300 hover:text-blue-500 transition-colors uppercase">
-        Skip →
-      </button>
     </div>
   </div>
 </template>
