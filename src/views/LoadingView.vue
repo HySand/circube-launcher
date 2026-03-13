@@ -24,7 +24,7 @@ let unlisten: UnlistenFn;
 
 const fetchQuote = async () => {
   try {
-    const response = await fetch("https://v1.hitokoto.cn/?c=c")
+    const response = await fetch("https://v1.hitokoto.cn/?c=d")
     const data = await response.json()
     cache.setQuote({ text: data.hitokoto, from: data.from })
   } catch {

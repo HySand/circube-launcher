@@ -111,9 +111,15 @@ pub async fn scan_java_environments() -> Vec<JavaInfo> {
     // 4. 统一元数据解析
     let mut result = Vec::new();
     for path in found_paths {
-        let path_str = path.to_string_lossy().to_string();
+        let mut cmd = Command::new(&path);
+        cmd.arg("-version");
 
-        if let Ok(out) = Command::new(&path).arg("-version").output() {
+        #[cfg(windows)]
+        {
+            cmd.creation_flags(0x08000000);
+        }
+
+        if let Ok(out) = cmd.output() {
             let full_text = format!(
                 "{}\n{}",
                 String::from_utf8_lossy(&out.stdout),
@@ -123,7 +129,7 @@ pub async fn scan_java_environments() -> Vec<JavaInfo> {
             if !full_text.trim().is_empty() {
                 let display_name = parse_java_display_name(&full_text);
                 result.push(JavaInfo {
-                    path: path_str,
+                    path: path.to_string_lossy().to_string(),
                     version: display_name
                 });
             }
@@ -143,7 +149,16 @@ pub fn validate_java(path: String) -> Result<JavaInfo, String> {
         return Err("Java 路径不存在或不是文件".into());
     }
 
-    match Command::new(&path_buf).arg("-version").output() {
+    let mut cmd = Command::new(&path_buf);
+    cmd.arg("-version");
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+
+    match cmd.output() {
         Ok(output) => {
             let full_text = format!(
                 "{}\n{}",
@@ -156,6 +171,7 @@ pub fn validate_java(path: String) -> Result<JavaInfo, String> {
             }
 
             let display_name = parse_java_display_name(&full_text);
+
             Ok(JavaInfo {
                 path,
                 version: display_name,

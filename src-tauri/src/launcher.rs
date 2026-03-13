@@ -177,7 +177,7 @@ pub async fn launch_minecraft(
         if lib_path.exists() {
             let p_str = lib_path.to_string_lossy().to_string();
             cp_list.push(p_str.clone());
-            // 特殊库进入 ModulePath (适用于较新版本的 Forge/NeoForge)
+            // 特殊库进入 ModulePath
             if path_str.contains("bootstraplauncher") ||
                path_str.contains("securejarhandler") ||
                path_str.contains("ow2/asm") ||
@@ -239,7 +239,7 @@ pub async fn launch_minecraft(
         }
     }
 
-    final_args.push("-DignoreList=bootstraplauncher,securejarhandler,asm-commons,asm-util,asm-analysis,asm-tree,asm,JarJarFileSystems,client-extra,fmlcore,javafmllanguage,lowcodelanguage,mclanguage,forge-,CirCube.jar".into());
+    final_args.push("-DignoreList=bootstraplauncher,securejarhandler,asm-commons,asm-util,asm-analysis,asm-tree,asm,JarJarFileSystems,client-extra,fmlcore,javafmllanguage,lowcodelanguage,mclanguage,forge-".into());
     final_args.push(format!("-DlibraryDirectory={}", libs_base.to_string_lossy()));
 
     if !mp_list.is_empty() {
