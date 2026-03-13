@@ -1,5 +1,5 @@
 <template>
-  <div class="w-screen h-screen overflow-hidden rounded-2xl border relative flex flex-col border-border">
+  <div class="w-screen h-screen overflow-hidden rounded-2xl relative flex flex-col">
     <TitleBar/>
     <Toaster richColors position="top-center" :duration="1500"/>
     <div class="flex-1 pt-10 overflow-y-auto" >

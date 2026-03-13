@@ -126,23 +126,27 @@ pub async fn launch_minecraft(
 
     emit_progress("正在校验用户身份...");
 
-    let (user_uuid, auth_type, access_token, user_name) = {
-        let auth = auth_state.lock().unwrap();
-        let user = auth.current_user_id.as_ref()
-            .and_then(|id| auth.users.iter().find(|u| &u.uuid == id))
-            .ok_or_else(|| "User not logged in".to_string())?;
-
-        (user.uuid.clone(), user.auth_type.clone(), user.access_token.clone(), user.name.clone())
-    };
-
     let (java_path, max_memory_config) = {
         let config = config_state.lock().unwrap();
         (config.java_path.clone(), config.max_memory)
     };
 
-    if let Err(e) = ensure_authenticated(&user_uuid, &auth_type, &access_token, &auth_state, app.clone()).await {
-        return Err(format!("认证失败: {}", e));
-    }
+    let (user_uuid, auth_type, initial_token) = {
+        let auth = auth_state.lock().unwrap();
+        let user = auth.current_user_id.as_ref()
+            .and_then(|id| auth.users.iter().find(|u| &u.uuid == id))
+            .ok_or_else(|| "User not logged in".to_string())?;
+        (user.uuid.clone(), user.auth_type.clone(), user.access_token.clone())
+    };
+
+    ensure_authenticated(&user_uuid, &auth_type, &initial_token, &auth_state, app.clone()).await?;
+
+    let (access_token, user_name) = {
+        let auth = auth_state.lock().unwrap();
+        let user = auth.users.iter().find(|u| u.uuid == user_uuid)
+            .ok_or("User data lost after auth")?;
+        (user.access_token.clone(), user.name.clone())
+    };
 
     emit_progress("正在准备文件系统...");
     let base_dir = std::env::current_exe()
@@ -232,7 +236,30 @@ pub async fn launch_minecraft(
 
     // 外置认证逻辑
     if auth_type == "Yggdrasil" {
-        let injector_path = base_dir.join("launcher").join("authlib-injector.jar");
+        let injector_dir = base_dir.join("launcher");
+        let injector_path = injector_dir.join("authlib-injector.jar");
+
+        if !injector_path.exists() {
+                emit_progress("正在获取 authlib-injector...");
+
+                // 1. 确保目录存在
+                std::fs::create_dir_all(&injector_dir).map_err(|e| e.to_string())?;
+
+                // 2. 直接同步/异步下载（这里使用 reqwest 的异步方式）
+                let download_url = "https://bmclapi2.bangbang93.com/mirrors/authlib-injector/artifact/55/authlib-injector-1.2.7.jar";
+                let response = reqwest::Client::new().get(download_url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("下载请求失败: {}", e))?;
+
+                if response.status().is_success() {
+                    let bytes = response.bytes().await.map_err(|e| format!("读取数据流失败: {}", e))?;
+                    std::fs::write(&injector_path, bytes).map_err(|e| format!("写入文件失败: {}", e))?;
+                } else {
+                    return Err(format!("下载服务器响应异常: {}", response.status()));
+                }
+            }
+
         if injector_path.exists() {
             final_args.push(format!("-javaagent:{}={}", injector_path.to_string_lossy(), "https://littleskin.cn/api/yggdrasil"));
             final_args.push(format!("-Dauthlibinjector.yggdrasil.prefetched={}", "eyJtZXRhIjp7InNlcnZlck5hbWUiOiJMaXR0bGVTa2luIiwiaW1wbGVtZW50YXRpb25OYW1lIjoiWWdnZHJhc2lsIENvbm5lY3QiLCJpbXBsZW1lbnRhdGlvblZlcnNpb24iOiIwLjAuOCIsImxpbmtzIjp7ImFubm91bmNlbWVudCI6Imh0dHBzOi8vbGl0dGxlc2tpbi5jbi9hcGkvYW5ub3VuY2VtZW50cyIsImhvbWVwYWdlIjoiaHR0cHM6Ly9saXR0bGVza2luLmNuIiwicmVnaXN0ZXIiOiJodHRwczovL2xpdHRsZXNraW4uY24vYXV0aC9yZWdpc3RlciJ9LCJmZWF0dXJlLm5vbl9lbWFpbF9sb2dpbiI6dHJ1ZSwiZmVhdHVyZS5lbmFibGVfcHJvZmlsZV9rZXkiOnRydWUsImZlYXR1cmUub3BlbmlkX2NvbmZpZ3VyYXRpb25fdXJsIjoiaHR0cHM6Ly9vcGVuLmxpdHRsZXNraW4uY24vLndlbGwta25vd24vb3BlbmlkLWNvbmZpZ3VyYXRpb24ifSwic2tpbkRvbWFpbnMiOlsibGl0dGxlc2tpbi5jbiJdLCJzaWduYXR1cmVQdWJsaWNrZXkiOiItLS0tLUJFR0lOIFBVQkxJQyBLRVktLS0tLVxuTUlJQ0lqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FnOEFNSUlDQ2dLQ0FnRUFyR2NOT09GSXFMSlNxb0UzdTBoalxudE9Fbk9jRVQzd2o5RHJzczFCRTZzQnFnUG8wYk11bE9VTGhxamtjL3VIL3d5b3NZbnp3M3hhYXpKdDg3alRIaFxuSjhCUE14Q2VRTW95RWRSb1MzSm5qMUcwS2V6ajRBMmI2MVBKSk0xRHB2REFjcVFCWXNyU2RwQkorNTJNam9HU1xudkpvZVFPNVhVbEpWUW0yMS9IbUpucXNQaHpjQTZIZ1k3MVJIWUU1eG5ocFdKaVB4TEtVUHRtdDZDTllVUVFvU1xubzJ2MzZYV2dNbUxCWmhBYk5PUHhZWCsxaW94S2FtamhMTzI5VWh3dGdZOVU2UFdFTzcvU0JmWHp5UlBUemhQVlxuMm5IcTdLSnFkOElJcmx0c2x2NmkvNEZFTTgxaXZTL21tK1BOM2hZbElZSzZ6NlltaWkxbnJRQXBsc0o2N09HcVxuWUh0V0tPdnBmVHpPb2xsdWdzUmloa0FHNE9CNmhNMFByNDVqakMzVEljN2VPN2tPZ0ljR1VHVVFHdXV1Z0RFelxuSjFOOUZGV25OL0g2UDl1a0ZlZzVTbUdDNSt3bVVQWlpDdE5CTHI4bzhzSTVIN1FoSzdOZ3dDYUdGb1l1aUFHTFxuZ3ozay8zWXdKNDBCYndRYXlRMmdJcWVueitYT0ZJQWxhanYrL255ZmNEdlpIOXZHTktQOWxWY0hYVVQ1WVJuU1xuWlNIbzVsd3ZWcllVcnFFQWJoL3pEejhRTUV5aXVqV3ZVa1BoWnM5Zmg2ZmltVUd4dG04bUZJUEN0UEpWWGplWVxud0QzTHZ0M2FJQjFKSGRVVEpSM2VFYzRlSWFUS013TVB5SlJ6Vm41ektzaXRhWnozbm4vY09BL3daQzlvcXlFVVxubWM5aDZaTVJUUlVFRTRUdGFKeWc5bE1DQXdFQUFRPT1cbi0tLS0tRU5EIFBVQkxJQyBLRVktLS0tLVxuIn0="));

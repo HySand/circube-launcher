@@ -18,7 +18,7 @@
         " {{ quote.text }} "
       </p>
       <p v-if="quote.from" class="text-[9px] text-slate-300 mt-1 font-bold uppercase tracking-wider text-right w-full">
-        — {{ quote.from }}
+        — 《{{ quote.from }}》
       </p>
     </div>
 
@@ -127,6 +127,10 @@ const handleLaunch = async () => {
       toast.error("账户已过期，请重新登录", { duration: 1500 });
       await invoke('logout_current_user')
       await router.push("/");
+    } else if (String(e).includes("认证失败")) {
+      toast.error("认证失败，请检查您的网络", { duration: 1500 });
+    } else {
+      toast.error("启动失败：" + e, { duration: 1500 });
     }
     isLaunching.value = false;
     console.error(e);
