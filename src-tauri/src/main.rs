@@ -64,6 +64,7 @@ fn main() {
             logout_current_user,
             utils::scan_java_environments,
             utils::validate_java,
+            utils::check_mc_directory,
             updater::sync_versions
         ])
         .run(tauri::generate_context!())

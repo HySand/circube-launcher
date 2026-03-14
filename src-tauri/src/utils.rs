@@ -180,3 +180,16 @@ pub fn validate_java(path: String) -> Result<JavaInfo, String> {
         Err(e) => Err(format!("无法执行 Java: {}", e)),
     }
 }
+
+#[tauri::command]
+pub async fn check_mc_directory() -> Result<bool, String> {
+    let exe_path = std::env::current_exe()
+        .map_err(|e| format!("无法获取程序路径: {}", e))?;
+
+    let current_dir = exe_path.parent()
+        .ok_or("无法获取父目录")?;
+
+    let mc_path = current_dir.join(".minecraft");
+
+    Ok(mc_path.exists() && mc_path.is_dir())
+}

@@ -34,6 +34,12 @@ interface JavaInfo { path: string; version: string }
 
 onMounted(async () => {
   fetchQuote();
+  const hasMcDir = await invoke<boolean>('check_mc_directory');
+  if (!hasMcDir) {
+    statusText.value = "当前目录错误";
+    toast.error("请将软件放置在.minecraft文件夹同级目录", { duration: 3500 });
+    return;
+  }
   unlisten = await listen<{ current: number; total: number; file: string }>(
     'download-progress',
     (event) => {
