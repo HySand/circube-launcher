@@ -133,7 +133,7 @@ pub async fn sync_versions(app_handle: tauri::AppHandle) -> Result<(), String> {
                                 });
                                 return Ok::<(), String>(());
                             }
-                            Err(e) if attempts < max_retries => {
+                            Err(_e) if attempts < max_retries => {
                                 attempts += 1;
                                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                             }

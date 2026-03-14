@@ -55,7 +55,6 @@ import 'vue-sonner/style.css'
 [data-sonner-toast] [data-title] {
   font-weight: 800 !important;
   font-size: 11px !important;
-  text-transform: uppercase !important;
   letter-spacing: 0.05em !important;
 }
 </style>
