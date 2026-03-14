@@ -1,6 +1,6 @@
 <template>
   <div class="h-full flex flex-col items-center justify-center bg-white animate-fade-in gap-4">
-    <Spinner class="text-blue-700"/>
+    <Spinner class="text-blue-700" />
 
     <p class="text-sm text-gray-500 font-medium tracking-tight animate-pulse min-h-[1.25rem]">
       {{ statusText }}
@@ -23,13 +23,9 @@ const statusText = ref("正在启动启动器...");
 let unlisten: UnlistenFn;
 
 const fetchQuote = async () => {
-  try {
-    const response = await fetch("https://v1.hitokoto.cn/?c=d")
-    const data = await response.json()
-    cache.setQuote({ text: data.hitokoto, from: data.from })
-  } catch {
-    cache.setQuote({ text: "Stay hungry, stay foolish.", from: "Steve Jobs" })
-  }
+  const response = await fetch("https://v1.hitokoto.cn/?c=d")
+  const data = await response.json()
+  cache.setQuote({ text: data.hitokoto, from: data.from })
 }
 
 interface UserInfo { uuid: string; name: string; accessToken: string; skinUrl: string; authType: string }
@@ -39,11 +35,11 @@ interface JavaInfo { path: string; version: string }
 onMounted(async () => {
   fetchQuote();
   unlisten = await listen<{ current: number; total: number; file: string }>(
-      'download-progress',
-      (event) => {
-        const { current, total } = event.payload;
-        statusText.value = `正在更新资源文件 (${current}/${total})`;
-      }
+    'download-progress',
+    (event) => {
+      const { current, total } = event.payload;
+      statusText.value = `正在更新资源文件 (${current}/${total})`;
+    }
   );
 
   try {
@@ -88,7 +84,8 @@ onMounted(async () => {
 
     await checkJavaAndProceed();
 
-    try {statusText.value = "正在检查更新...";
+    try {
+      statusText.value = "正在检查更新...";
       await invoke('sync_versions');
     } catch (e) {
       console.error("更新失败:", e);

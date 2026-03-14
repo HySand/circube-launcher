@@ -1,14 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod models;
 mod auth;
 mod launcher;
-mod utils;
+mod models;
 mod updater;
+mod utils;
 
-use std::sync::{Arc, Mutex};
-use std::fs;
 use models::{AuthState, Config, UserInfo};
+use std::fs;
+use std::sync::{Arc, Mutex};
 
 #[tauri::command]
 fn save_config(config: Config, state: tauri::State<'_, Mutex<Config>>) -> Result<(), String> {
@@ -25,7 +25,9 @@ fn get_config(s: tauri::State<'_, Mutex<Config>>) -> Config {
 #[tauri::command]
 fn get_current_user(s: tauri::State<'_, Mutex<AuthState>>) -> Option<UserInfo> {
     let auth = s.lock().unwrap();
-    auth.current_user_id.as_ref().and_then(|id| auth.users.iter().find(|u| &u.uuid == id).cloned())
+    auth.current_user_id
+        .as_ref()
+        .and_then(|id| auth.users.iter().find(|u| &u.uuid == id).cloned())
 }
 
 #[tauri::command]
@@ -36,7 +38,9 @@ fn logout_current_user(state: tauri::State<'_, Mutex<AuthState>>) -> bool {
 
     let path = AuthState::file_path();
     if path.exists() {
-        if let Err(_) = fs::remove_file(&path) { return false; }
+        if let Err(_) = fs::remove_file(&path) {
+            return false;
+        }
     }
     true
 }

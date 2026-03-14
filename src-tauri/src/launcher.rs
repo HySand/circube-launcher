@@ -8,39 +8,53 @@ use sysinfo::System;
 use tauri::{AppHandle, Emitter, State};
 use crate::utils::validate_java;
 use crate::auth::ensure_authenticated;
+use tauri::Manager;
+
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-#[derive(Deserialize)]
+const LAUNCHER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[derive(Deserialize, Debug, Clone)]
 pub struct VersionConfig {
     pub arguments: Arguments,
     #[serde(rename = "mainClass")]
     pub main_class: String,
     pub libraries: Vec<Library>,
+    #[serde(rename = "assetIndex")]
+    pub asset_index: Option<AssetIndex>,
+    #[serde(rename = "assets")]
+    pub assets: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, Clone)]
+pub struct AssetIndex {
+    pub id: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
 pub struct Library {
     pub downloads: LibraryDownloads,
+    pub rules: Option<Vec<Rule>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct LibraryDownloads {
     pub artifact: Artifact,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct Artifact {
     pub path: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct Arguments {
     pub game: Vec<Argument>,
     pub jvm: Vec<Argument>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum Argument {
     Simple(String),
@@ -50,32 +64,31 @@ pub enum Argument {
     },
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum ArgumentValue {
     Single(String),
     Many(Vec<String>),
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct Rule {
     pub action: String,
     pub os: Option<OSRule>,
+    pub features: Option<HashMap<String, bool>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct OSRule {
     pub name: Option<String>,
-    #[allow(dead_code)]
-    pub arch: Option<String>,
 }
 
 impl Argument {
-    pub fn resolve(&self, env: &HashMap<&str, String>) -> Vec<String> {
+    pub fn resolve(&self, env: &HashMap<String, String>, launcher_features: &HashMap<String, bool>) -> Vec<String> {
         match self {
             Argument::Simple(s) => vec![Self::replace_vars(s, env)],
             Argument::Conditional { rules, value } => {
-                if Self::evaluate_rules(rules) {
+                if Self::evaluate_rules(rules, launcher_features) {
                     match value {
                         ArgumentValue::Single(s) => vec![Self::replace_vars(s, env)],
                         ArgumentValue::Many(v) => v.iter().map(|s| Self::replace_vars(s, env)).collect(),
@@ -87,31 +100,72 @@ impl Argument {
         }
     }
 
-    fn evaluate_rules(rules: &[Rule]) -> bool {
+    fn evaluate_rules(rules: &[Rule], launcher_features: &HashMap<String, bool>) -> bool {
+        if rules.is_empty() {
+            return true;
+        }
+
+        let mut allowed = true;
         for rule in rules {
             let mut matched = true;
+
             if let Some(ref os_rule) = rule.os {
                 let current_os = if cfg!(target_os = "windows") { "windows" }
                                  else if cfg!(target_os = "macos") { "osx" }
                                  else { "linux" };
+
                 if let Some(ref name) = os_rule.name {
-                    if name != current_os { matched = false; }
+                    if name != current_os {
+                        matched = false;
+                    }
                 }
             }
-            if (rule.action == "allow" && !matched) || (rule.action == "disallow" && matched) {
-                return false;
+
+            if let Some(ref features) = rule.features {
+                for (key, val) in features {
+                    let launcher_val = launcher_features.get(key).copied().unwrap_or(false);
+                    if launcher_val != *val {
+                        matched = false;
+                        break;
+                    }
+                }
+            }
+
+            if rule.action == "allow" {
+                if !matched { allowed = false; }
+            } else if rule.action == "disallow" {
+                if matched { allowed = false; }
             }
         }
-        true
+        allowed
     }
 
-    fn replace_vars(template: &str, env: &HashMap<&str, String>) -> String {
+    fn replace_vars(template: &str, env: &HashMap<String, String>) -> String {
         let mut result = template.to_string();
-        for (key, val) in env {
-            result = result.replace(key, val);
+        let mut keys: Vec<&String> = env.keys().collect();
+        keys.sort_by(|a, b| b.len().cmp(&a.len()));
+
+        for key in keys {
+            if let Some(val) = env.get(key) {
+                result = result.replace(key, val);
+            }
         }
         result
     }
+}
+
+fn get_launcher_features(env: &HashMap<String, String>) -> HashMap<String, bool> {
+    let mut features = HashMap::new();
+    features.insert("is_demo_user".to_string(), false);
+    features.insert("has_custom_resolution".to_string(),
+        env.get("${resolution_width}").map_or(false, |w| w != "854") ||
+        env.get("${resolution_height}").map_or(false, |h| h != "480")
+    );
+    features.insert("has_quick_plays_support".to_string(), true);
+    features.insert("is_quick_play_singleplayer".to_string(), false);
+    features.insert("is_quick_play_multiplayer".to_string(), false);
+    features.insert("is_quick_play_realms".to_string(), false);
+    features
 }
 
 #[tauri::command]
@@ -128,7 +182,10 @@ pub async fn launch_minecraft(
 
     let (java_path, max_memory_config) = {
         let config = config_state.lock().unwrap();
-        (config.java_path.clone(), config.max_memory)
+        (
+            config.java_path.clone(),
+            config.max_memory,
+        )
     };
 
     let (user_uuid, auth_type, initial_token) = {
@@ -157,65 +214,93 @@ pub async fn launch_minecraft(
     let mc_dir = base_dir.join(".minecraft");
 
     let version_name = VERSION.get().map(|s| s.as_str()).unwrap_or("UNKNOWN");
+
     let version_json_path = mc_dir.join(format!("versions/{0}/{0}.json", version_name));
     let raw_json = fs::read_to_string(&version_json_path)
         .map_err(|_| format!("Missing {}.json", version_name))?;
     let ver_cfg: VersionConfig = serde_json::from_str(&raw_json).map_err(|e| e.to_string())?;
 
+    let assets_index_name = ver_cfg.asset_index
+        .as_ref()
+        .map(|a| a.id.as_str())
+        .or(ver_cfg.assets.as_deref())
+        .unwrap_or("1.8");
+
     emit_progress("正在扫描依赖库...");
     let libs_base = mc_dir.join("libraries");
     let cp_sep = if cfg!(windows) { ";" } else { ":" };
 
-    let mut cp_list = Vec::new();
-    let mut mp_list = Vec::new();
+    let mut cp_list: Vec<String> = Vec::new();
+    let current_os_name = if cfg!(target_os = "windows") { "windows" }
+                          else if cfg!(target_os = "macos") { "osx" }
+                          else { "linux" };
 
     for lib in &ver_cfg.libraries {
-        let current_os = std::env::consts::OS;
-        let path_str = &lib.downloads.artifact.path;
-
-        if current_os == "windows" && (path_str.contains("linux") || path_str.contains("macos")) { continue; }
-        if current_os == "linux" && (path_str.contains("windows") || path_str.contains("macos")) { continue; }
-        if current_os == "macos" && (path_str.contains("windows") || path_str.contains("linux")) { continue; }
-
-        let lib_path = libs_base.join(path_str);
-        if lib_path.exists() {
-            let p_str = lib_path.to_string_lossy().to_string();
-            cp_list.push(p_str.clone());
-            // 特殊库进入 ModulePath
-            if path_str.contains("bootstraplauncher") ||
-               path_str.contains("securejarhandler") ||
-               path_str.contains("ow2/asm") ||
-               path_str.contains("JarJarFileSystems") {
-                mp_list.push(p_str);
+        if let Some(rules) = &lib.rules {
+            let mut allowed = true;
+            for rule in rules {
+                let mut matched = true;
+                if let Some(ref os_rule) = rule.os {
+                    if let Some(ref name) = os_rule.name {
+                        if name != current_os_name { matched = false; }
+                    }
+                }
+                if rule.action == "allow" && !matched { allowed = false; }
+                if rule.action == "disallow" && matched { allowed = false; }
             }
+            if !allowed { continue; }
+        }
+
+        let path_str = &lib.downloads.artifact.path;
+        let lib_path = libs_base.join(path_str);
+
+        if lib_path.exists() {
+            cp_list.push(lib_path.to_string_lossy().to_string());
         }
     }
 
+    let version_jar_path = mc_dir.join(format!("versions/{0}/{0}.jar", version_name));
+    if version_jar_path.exists() {
+        cp_list.push(version_jar_path.to_string_lossy().to_string());
+    } else {
+        emit_progress(&format!("警告: 未找到核心文件 {:?}", version_jar_path));
+    }
+
     emit_progress("正在构建环境变量...");
-    let mut env = HashMap::new();
+    let mut env: HashMap<String, String> = HashMap::new();
+
     let cp_str = cp_list.join(cp_sep);
 
-    env.insert("${auth_player_name}", user_name.clone());
-    env.insert("${auth_uuid}", user_uuid.clone());
-    env.insert("${auth_access_token}", access_token.clone());
-    env.insert("${user_type}", "msa".into());
-    env.insert("${clientid}", "circube".into());
-    env.insert("${auth_xuid}", "0".into());
-    env.insert("${version_name}", version_name.into());
-    env.insert("${game_directory}", mc_dir.join(format!("versions/{}", version_name)).to_string_lossy().into());
-    env.insert("${assets_root}", mc_dir.join("assets").to_string_lossy().into());
-    env.insert("${assets_index_name}", "5".into());
-    env.insert("${version_type}", "CirCube".into());
-    env.insert("${natives_directory}", mc_dir.join("natives").to_string_lossy().into());
-    env.insert("${library_directory}", libs_base.to_string_lossy().into());
-    env.insert("${classpath_separator}", cp_sep.into());
-    env.insert("${classpath}", cp_str);
-    env.insert("${resolution_width}", "854".into());
-    env.insert("${resolution_height}", "480".into());
-    env.insert("${quickPlayPath}", "".into());
-    env.insert("${quickPlaySingleplayer}", "".into());
-    env.insert("${quickPlayMultiplayer}", "".into());
-    env.insert("${quickPlayRealms}", "".into());
+    let assets_dir = mc_dir.join("assets");
+    let version_dir = mc_dir.join(format!("versions/{}", version_name));
+    let natives_dir = version_dir.join(format!("{}-natives", version_name));
+
+    env.insert("${auth_player_name}".to_string(), user_name.clone());
+    env.insert("${auth_uuid}".to_string(), user_uuid.clone());
+    env.insert("${auth_access_token}".to_string(), access_token.clone());
+    env.insert("${user_type}".to_string(), "msa".to_string());
+    env.insert("${clientid}".to_string(), "circube".to_string());
+    env.insert("${versionType}".to_string(), "CirCube Launcher".to_string());
+    env.insert("${auth_xuid}".to_string(), "0".to_string());
+    env.insert("${version_name}".to_string(), version_name.to_string());
+    env.insert("${game_directory}".to_string(), version_dir.to_string_lossy().to_string());
+    env.insert("${assets_root}".to_string(), assets_dir.to_string_lossy().to_string());
+    env.insert("${assets_index_name}".to_string(), assets_index_name.to_string());
+    env.insert("${version_type}".to_string(), "CirCube Launcher".to_string());
+    env.insert("${natives_directory}".to_string(), natives_dir.to_string_lossy().to_string());
+    env.insert("${library_directory}".to_string(), libs_base.to_string_lossy().to_string());
+    env.insert("${classpath_separator}".to_string(), cp_sep.to_string());
+    env.insert("${classpath}".to_string(), cp_str);
+    env.insert("${resolution_width}".to_string(), "1600".to_string());
+    env.insert("${resolution_height}".to_string(), "900".to_string());
+    env.insert("${quickPlayPath}".to_string(), "".to_string());
+    env.insert("${quickPlaySingleplayer}".to_string(), "".to_string());
+    env.insert("${quickPlayMultiplayer}".to_string(), "".to_string());
+    env.insert("${quickPlayRealms}".to_string(), "".to_string());
+    env.insert("${launcher_name}".to_string(), "CirCube Launcher".to_string());
+    env.insert("${launcher_version}".to_string(), LAUNCHER_VERSION.to_string());
+
+    let launcher_features = get_launcher_features(&env);
 
     emit_progress("正在优化内存配置...");
     let mut final_max_memory = max_memory_config;
@@ -229,51 +314,48 @@ pub async fn launch_minecraft(
         final_max_memory = std::cmp::max(2048, recommendation);
     }
 
-    let mut final_args = Vec::new();
+    let mut final_args: Vec<String> = Vec::new();
     final_args.push(format!("-Xms{}M", final_max_memory));
     final_args.push(format!("-Xmx{}M", final_max_memory));
-    final_args.push("-Dfile.encoding=UTF-8".into());
+    final_args.push("-Dfile.encoding=UTF-8".to_string());
 
-    // 外置认证逻辑
     if auth_type == "Yggdrasil" {
         let injector_dir = base_dir.join("launcher");
         let injector_path = injector_dir.join("authlib-injector.jar");
 
         if !injector_path.exists() {
-                emit_progress("正在获取认证插件最新版本信息...");
+            emit_progress("正在获取认证插件最新版本信息...");
 
-                let download_client = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(15))
-                    .build()
-                    .map_err(|e| e.to_string())?;
+            let download_client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .map_err(|e| e.to_string())?;
 
-                // 1. 获取最新版本元数据
-                let latest_json_url = "https://bmclapi2.bangbang93.com/mirrors/authlib-injector/artifact/latest.json";
-                let res = download_client.get(latest_json_url)
-                    .send().await.map_err(|e| format!("获取元数据失败: {}", e))?;
+            let latest_json_url = "https://bmclapi2.bangbang93.com/mirrors/authlib-injector/artifact/latest.json";
+            let res = download_client.get(latest_json_url)
+                .send().await.map_err(|e| format!("获取元数据失败：{}", e))?;
 
-                // 定义局部结构体用于反序列化
-                #[derive(serde::Deserialize)]
-                struct InjectorMeta {
-                    download_url: String,
-                    version: String,
-                }
-
-                let meta: InjectorMeta = res.json().await.map_err(|e| format!("解析元数据失败: {}", e))?;
-
-                emit_progress(&format!("正在下载 authlib-injector v{}...", meta.version));
-
-                let response = download_client.get(&meta.download_url)
-                    .send().await.map_err(|e| format!("下载请求失败: {}", e))?;
-
-                if response.status().is_success() {
-                    std::fs::create_dir_all(&injector_dir).map_err(|e| e.to_string())?;
-                    let bytes = response.bytes().await.map_err(|e| e.to_string())?;
-                    std::fs::write(&injector_path, bytes).map_err(|e| e.to_string())?;
-                } else {
-                    return Err(format!("下载服务器响应异常: {}", response.status()));
-                }
+            #[derive(serde::Deserialize)]
+            struct InjectorMeta {
+                download_url: String,
+                version: String,
             }
+
+            let meta: InjectorMeta = res.json().await.map_err(|e| format!("解析元数据失败：{}", e))?;
+
+            emit_progress(&format!("正在下载 authlib-injector v{}...", meta.version));
+
+            let response = download_client.get(&meta.download_url)
+                .send().await.map_err(|e| format!("下载请求失败：{}", e))?;
+
+            if response.status().is_success() {
+                std::fs::create_dir_all(&injector_dir).map_err(|e| e.to_string())?;
+                let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+                std::fs::write(&injector_path, bytes).map_err(|e| e.to_string())?;
+            } else {
+                return Err(format!("下载服务器响应异常：{}", response.status()));
+            }
+        }
 
         if injector_path.exists() {
             final_args.push(format!("-javaagent:{}={}", injector_path.to_string_lossy(), "https://littleskin.cn/api/yggdrasil"));
@@ -281,34 +363,31 @@ pub async fn launch_minecraft(
         }
     }
 
-    final_args.push("-DignoreList=bootstraplauncher,securejarhandler,asm-commons,asm-util,asm-analysis,asm-tree,asm,JarJarFileSystems,client-extra,fmlcore,javafmllanguage,lowcodelanguage,mclanguage,forge-".into());
-    final_args.push(format!("-DlibraryDirectory={}", libs_base.to_string_lossy()));
-
-    if !mp_list.is_empty() {
-        final_args.push("-cp".into());
-        final_args.push(mp_list.join(cp_sep));
-    }
-
-    // 解析 JVM 和 游戏参数
+    // 1. 解析 JVM 参数
     for arg in &ver_cfg.arguments.jvm {
-        final_args.extend(arg.resolve(&env));
+        final_args.extend(arg.resolve(&env, &launcher_features));
     }
+
+    // 2. 添加主类
     final_args.push(ver_cfg.main_class.clone());
+
+    // 3. 解析游戏参数
     for arg in &ver_cfg.arguments.game {
-        final_args.extend(arg.resolve(&env));
+        final_args.extend(arg.resolve(&env, &launcher_features));
     }
+
+    // 4. 清理 demo 标记
     final_args.retain(|arg| arg != "--demo");
 
-    emit_progress("正在验证JAVA...");
-
-    // 验证 Java 环境
-    match validate_java(java_path.clone()) {
+    emit_progress("正在验证 JAVA...");
+    let java_path_str: String = java_path.clone();
+    match validate_java(java_path_str) {
        Ok(info) => {
-            emit_progress(&format!("Java 校验通过: {} ({})", info.version, info.path));
+            emit_progress(&format!("Java 校验通过：{} ({})", info.version, info.path));
        }
        Err(err) => {
-            emit_progress(&format!("Java 验证失败: {}", err));
-            return Err(format!("无法启动游戏: {}", err));
+            emit_progress(&format!("Java 验证失败：{}", err));
+            return Err(format!("无法启动游戏：{}", err));
        }
     }
 
@@ -316,7 +395,7 @@ pub async fn launch_minecraft(
 
     let mut cmd = Command::new(java_path);
     cmd.args(&final_args)
-       .current_dir(&mc_dir);
+       .current_dir(&version_dir);
 
     #[cfg(windows)]
     {
@@ -327,10 +406,18 @@ pub async fn launch_minecraft(
         .spawn()
         .map_err(|e| format!("Launch failed: {}", e))?;
 
-    // 监控进程退出 (使用 OS 线程以避免阻塞运行时)
     let handle_clone = app.clone();
+
+    if let Some(main_window) = app.get_webview_window("main") {
+        let _ = main_window.minimize();
+    }
+
     std::thread::spawn(move || {
         let _ = child.wait();
+        if let Some(main_window) = handle_clone.get_webview_window("main") {
+            let _ = main_window.unminimize();
+            let _ = main_window.set_focus();
+        }
         let _ = handle_clone.emit("game-exited", ());
     });
 

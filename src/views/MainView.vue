@@ -6,9 +6,13 @@
       </h2>
 
       <button @click="handleSettings"
-              class="p-2.5 bg-slate-50 hover:bg-slate-100 text-slate-400 hover:text-blue-600 rounded-xl transition-all duration-300 active:scale-90 group border border-slate-100/50">
-        <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 group-hover:rotate-90 transition-transform duration-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>
+        class="p-2.5 bg-slate-50 hover:bg-slate-100 text-slate-400 hover:text-blue-600 rounded-xl transition-all duration-300 active:scale-90 group border border-slate-100/50">
+        <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 group-hover:rotate-90 transition-transform duration-500"
+          viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
+          stroke-linejoin="round">
+          <path
+            d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+          <circle cx="12" cy="12" r="3" />
         </svg>
       </button>
     </header>
@@ -23,7 +27,8 @@
     </div>
 
     <div class="flex-1 flex justify-center items-center min-h-0">
-      <div class="h-full aspect-[1/2] bg-slate-50/50 rounded-[48px] border border-slate-100 flex items-center justify-center relative overflow-hidden group shadow-inner transition-all duration-500 hover:bg-white hover:border-blue-100">
+      <div
+        class="h-full aspect-[1/2] bg-slate-50/50 rounded-[48px] border border-slate-100 flex items-center justify-center relative overflow-hidden group shadow-inner transition-all duration-500 hover:bg-white hover:border-blue-100">
         <div class="absolute inset-0 bg-gradient-to-br from-blue-50/20 via-transparent to-slate-100/30"></div>
         <div ref="container" class="z-10 pt-4 flex flex-col items-center"></div>
       </div>
@@ -33,20 +38,24 @@
       <p v-if="isLaunching" class="text-[10px] text-blue-500 font-bold animate-pulse tracking-widest uppercase">
         {{ launchStatus }}
       </p>
-      <button @click="handleLaunch"
-              :disabled="isLaunching"
-              class="w-full py-5 text-white rounded-[24px] text-[12px] font-black tracking-widest shadow-lg transition-all duration-300 active:scale-95 flex items-center justify-center gap-3 group"
-              :class="[isLaunching ? 'bg-slate-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 shadow-blue-100']">
+      <button @click="handleLaunch" :disabled="isLaunching"
+        class="w-full py-5 text-white rounded-[24px] text-[12px] font-black tracking-widest shadow-lg transition-all duration-300 active:scale-95 flex items-center justify-center gap-3 group"
+        :class="[isLaunching ? 'bg-slate-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 shadow-blue-100']">
         <template v-if="!isLaunching">
           <span>CirCube 启动！</span>
-          <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 group-hover:translate-y-[-2px] transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-            <path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>
+          <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 group-hover:translate-y-[-2px] transition-transform"
+            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"
+            stroke-linejoin="round">
+            <path d="m5 12 7-7 7 7" />
+            <path d="M12 19V5" />
           </svg>
         </template>
         <template v-else>
           <svg class="animate-spin h-5 w-5 text-white" fill="none" viewBox="0 0 24 24">
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            <path class="opacity-75" fill="currentColor"
+              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z">
+            </path>
           </svg>
           <span>CirCube运行中</span>
         </template>
@@ -56,12 +65,12 @@
 </template>
 
 <script setup lang="ts">
-import {ref, onMounted, onUnmounted, watch, nextTick} from "vue";
+import { ref, onMounted, onUnmounted, watch, nextTick } from "vue";
 import { useRouter } from "vue-router";
 import { useCacheStore } from '@/stores/cache';
 import * as skinview3d from 'skinview3d';
-import {invoke} from "@tauri-apps/api/core";
-import {listen, UnlistenFn} from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
+import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { toast } from 'vue-sonner';
 
 const router = useRouter();
