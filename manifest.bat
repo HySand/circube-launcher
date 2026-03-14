@@ -3,7 +3,7 @@ setlocal enabledelayedexpansion
 chcp 65001 >nul
 
 echo ======================================================
-echo           Minecraft 清单生成器 (Enhanced)
+echo           Minecraft 清单生成器
 echo ======================================================
 
 :input_manifest_ver
@@ -19,8 +19,7 @@ set "OUTPUT_FILE=manifest.json"
 
 echo [System] 正在扫描: %TARGET_DIR%...
 
-:: 使用 PowerShell 处理 JSON 构建与哈希计算
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+pwsh -NoProfile -ExecutionPolicy Bypass -Command ^
     "$target = [System.IO.Path]::GetFullPath('%TARGET_DIR%');" ^
     "$files = Get-ChildItem -LiteralPath $target -Recurse -File;" ^
     "$manifest = [ordered]@{ " ^
@@ -38,7 +37,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "        Write-Host ('[失败] 无法读取文件: ' + $relPath) -ForegroundColor Red;" ^
     "    }" ^
     "};" ^
-    "$manifest | ConvertTo-Json -Depth 10 -Compress | Out-File -FilePath '%OUTPUT_FILE%' -Encoding utf8"
+    "$manifest | ConvertTo-Json -Depth 10 -Compress | Out-File -FilePath '%OUTPUT_FILE%' -Encoding utf8NoBOM"
 
 echo ------------------------------------------------------
 echo [成功] 清单已生成至: %OUTPUT_FILE%

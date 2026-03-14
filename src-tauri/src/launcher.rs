@@ -240,21 +240,36 @@ pub async fn launch_minecraft(
         let injector_path = injector_dir.join("authlib-injector.jar");
 
         if !injector_path.exists() {
-                emit_progress("正在获取 authlib-injector...");
+                emit_progress("正在获取认证插件最新版本信息...");
 
-                // 1. 确保目录存在
-                std::fs::create_dir_all(&injector_dir).map_err(|e| e.to_string())?;
+                let download_client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(15))
+                    .build()
+                    .map_err(|e| e.to_string())?;
 
-                // 2. 直接同步/异步下载（这里使用 reqwest 的异步方式）
-                let download_url = "https://bmclapi2.bangbang93.com/mirrors/authlib-injector/artifact/55/authlib-injector-1.2.7.jar";
-                let response = reqwest::Client::new().get(download_url)
-                    .send()
-                    .await
-                    .map_err(|e| format!("下载请求失败: {}", e))?;
+                // 1. 获取最新版本元数据
+                let latest_json_url = "https://bmclapi2.bangbang93.com/mirrors/authlib-injector/artifact/latest.json";
+                let res = download_client.get(latest_json_url)
+                    .send().await.map_err(|e| format!("获取元数据失败: {}", e))?;
+
+                // 定义局部结构体用于反序列化
+                #[derive(serde::Deserialize)]
+                struct InjectorMeta {
+                    download_url: String,
+                    version: String,
+                }
+
+                let meta: InjectorMeta = res.json().await.map_err(|e| format!("解析元数据失败: {}", e))?;
+
+                emit_progress(&format!("正在下载 authlib-injector v{}...", meta.version));
+
+                let response = download_client.get(&meta.download_url)
+                    .send().await.map_err(|e| format!("下载请求失败: {}", e))?;
 
                 if response.status().is_success() {
-                    let bytes = response.bytes().await.map_err(|e| format!("读取数据流失败: {}", e))?;
-                    std::fs::write(&injector_path, bytes).map_err(|e| format!("写入文件失败: {}", e))?;
+                    std::fs::create_dir_all(&injector_dir).map_err(|e| e.to_string())?;
+                    let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+                    std::fs::write(&injector_path, bytes).map_err(|e| e.to_string())?;
                 } else {
                     return Err(format!("下载服务器响应异常: {}", response.status()));
                 }

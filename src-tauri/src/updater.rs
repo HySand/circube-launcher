@@ -10,7 +10,7 @@ use tauri::Emitter;
 use walkdir::WalkDir;
 use reqwest::Client;
 
-const REMOTE_MANIFEST_URL: &str = "https://drive.atmospherium.space/public/updater/manifest.json";
+const REMOTE_MANIFEST_URL: &str = "https://gitee.com/hysand/CirCube/raw/main/manifest.json";
 const DOWNLOAD_BASE_URL: &str   = "https://drive.atmospherium.space/public/updater/.minecraft/";
 
 #[tauri::command]
@@ -39,29 +39,23 @@ pub async fn sync_versions(app_handle: tauri::AppHandle) -> Result<(), String> {
     }
 
     // 3. 第二阶段：网络请求获取远程清单
-    let client = Client::builder()
-        .user_agent("Mozilla/5.0 AtmospheriumLauncher/1.0")
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = reqwest::Client::new();
 
-    let response = match client.get(REMOTE_MANIFEST_URL).send().await {
-        Ok(res) => res,
-        Err(e) => {
-            let _ = VERSION.set(final_version_dir);
-            return Err(format!("网络请求失败，已恢复本地版本配置: {}", e));
-        }
-    };
-
-    if !response.status().is_success() {
-        let _ = VERSION.set(final_version_dir);
-        return Err(format!("服务器返回错误状态码: {}", response.status()));
-    }
-
-    let text = response.text().await.map_err(|e| e.to_string())?;
-
-    let remote_manifest: Manifest = serde_json::from_str(&text).map_err(|e| {
-        format!("清单解析失败 (可能是收到了报错网页): {}. 响应内容前缀: {}", e, text.chars().take(100).collect::<String>())
-    })?;
+    let remote_manifest: Manifest = client
+        .get(REMOTE_MANIFEST_URL)
+        .send()
+        .await
+        .map_err(|e| format!("网络请求失败: {}", e))?
+        .error_for_status()
+        .map_err(|e| {
+            let _ = VERSION.set(final_version_dir.clone());
+            format!("服务器响应异常: {}", e)
+        })?
+        .json::<Manifest>()
+        .await
+        .map_err(|e| {
+            format!("JSON 解析失败 (结构不匹配或非合法 JSON): {}", e)
+        })?;
 
     final_version_dir = remote_manifest.version.clone();
     let _ = VERSION.set(final_version_dir.clone());
