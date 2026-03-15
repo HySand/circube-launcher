@@ -61,7 +61,7 @@ pub async fn scan_java_environments() -> Vec<JavaInfo> {
 
     // 1. 基于 PATH 环境变量查询
     let (search_cmd, target_bin) = if cfg!(windows) {
-        ("where", "javaw.exe")
+        ("where", "java.exe")
     } else {
         ("which", "java")
     };

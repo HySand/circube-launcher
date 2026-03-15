@@ -35,7 +35,7 @@
                 <CommandGroup>
                   <CommandItem v-for="java in javaDetailList" :key="java.path" :value="java.path"
                     @select="handleJavaSelect(java.path)"
-                    class="flex items-center justify-between p-3 mb-1 rounded-xl cursor-pointer hover:bg-slate-50 group">
+                    class="flex items-center justify-between p-3 mb-1 rounded-xl cursor-pointer hover:bg-slate-50/30 group">
                     <div class="flex flex-col gap-1 overflow-hidden">
                       <span
                         class="font-black text-[11px] tracking-tight text-slate-700 group-hover:text-blue-600 transition-colors">{{
@@ -54,7 +54,7 @@
 
       <section class="space-y-6">
         <div class="flex items-center justify-between px-1">
-          <h3 class="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">内存调优</h3>
+          <h3 class="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">内存分配</h3>
           <div class="flex gap-4">
             <button @click="autoTuneMemory" :disabled="isTuning"
               class="text-[10px] font-black text-blue-600 hover:text-blue-700 uppercase disabled:opacity-30">
@@ -113,9 +113,9 @@
       </section>
     </div>
 
-    <footer class="p-6 border-t border-slate-100 bg-white/80 backdrop-blur-md flex-none">
+    <footer class="p-6 border-t border-slate-100 bg-white/80 flex-none">
       <Button variant="destructive"
-        class="w-full py-7 bg-red-500 hover:bg-red-600 text-white rounded-2xl font-black text-[11px] uppercase tracking-[0.2em] shadow-lg shadow-red-200/50 transition-all active:scale-[0.98]"
+        class="w-full py-7 bg-red-500 hover:bg-red-600 text-white rounded-2xl font-black text-[12px] uppercase tracking-[0.2em] shadow-lg shadow-red-200/50 transition-all active:scale-[0.98]"
         @click="handleLogout">注销当前会话</Button>
     </footer>
   </div>

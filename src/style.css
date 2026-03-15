@@ -8,3 +8,12 @@
         -moz-osx-font-smoothing: grayscale;
     }
 }
+
+.custom-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: #e2e8f0 transparent;
+}
+
+.dark .custom-scrollbar {
+    scrollbar-color: #334155 transparent;
+}

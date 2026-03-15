@@ -39,7 +39,7 @@
         {{ launchStatus }}
       </p>
       <button @click="handleLaunch" :disabled="isLaunching"
-        class="w-full py-5 text-white rounded-[24px] text-[12px] font-black tracking-widest shadow-lg transition-all duration-300 active:scale-95 flex items-center justify-center gap-3 group"
+        class="w-full py-5 text-white rounded-[24px] text-[15px] font-black tracking-widest shadow-lg transition-all duration-300 active:scale-95 flex items-center justify-center gap-3 group"
         :class="[isLaunching ? 'bg-slate-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 shadow-blue-100']">
         <template v-if="!isLaunching">
           <span>CirCube 启动！</span>
@@ -83,14 +83,12 @@ const skinUrl = ref(cache.user?.skinUrl ?? "https://textures.minecraft.net/textu
 const container = ref<HTMLElement | null>(null);
 let viewer: skinview3d.SkinViewer | null = null;
 
-// 新增：启动状态变量
 const isLaunching = ref(false);
 const launchStatus = ref("");
 let unlistenStatus: UnlistenFn;
 let unlistenExit: UnlistenFn;
 
 onMounted(async () => {
-  // 保持原有皮肤预览逻辑
   if (container.value && skinUrl.value) {
     viewer = new skinview3d.SkinViewer({
       canvas: document.createElement('canvas'),
@@ -103,12 +101,10 @@ onMounted(async () => {
     viewer.animation = new skinview3d.IdleAnimation();
   }
 
-  // 监听进度状态
   unlistenStatus = await listen<string>("launch-status", (event) => {
     launchStatus.value = event.payload;
   });
 
-  // 监听退出
   unlistenExit = await listen("game-exited", () => {
     isLaunching.value = false;
     launchStatus.value = "";
