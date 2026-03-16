@@ -57,6 +57,7 @@ pub async fn ms_login(
     let client = reqwest::Client::new();
     let params = [
         ("client_id", CLIENT_ID),
+        ("tenant", "consumers"),
         ("scope", "XboxLive.signin offline_access"),
     ];
 

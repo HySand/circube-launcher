@@ -10,7 +10,7 @@
 
     <div class="flex-1 overflow-y-auto p-6 space-y-10 custom-scroll">
       <section class="space-y-4">
-        <h3 class="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">JDK选择</h3>
+        <h3 class="text-[11px] font-black text-slate-400 uppercase tracking-[0.2em]">JDK选择</h3>
         <Popover v-model:open="open">
           <PopoverTrigger as-child>
             <Button ref="triggerRef" variant="outline" role="combobox"
@@ -54,7 +54,7 @@
 
       <section class="space-y-6">
         <div class="flex items-center justify-between px-1">
-          <h3 class="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">内存分配</h3>
+          <h3 class="text-[11px] font-black text-slate-400 uppercase tracking-[0.2em]">内存分配</h3>
           <div class="flex gap-4">
             <button @click="autoTuneMemory" :disabled="isTuning"
               class="text-[10px] font-black text-blue-600 hover:text-blue-700 uppercase disabled:opacity-30">

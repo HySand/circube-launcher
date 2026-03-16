@@ -9,6 +9,7 @@ use futures::StreamExt;
 use tauri::Emitter;
 use walkdir::WalkDir;
 use reqwest::Client;
+use urlencoding::encode;
 
 const REMOTE_MANIFEST_URL: &str = "https://gitee.com/hysand/CirCube/raw/main/manifest.json";
 const DOWNLOAD_BASE_URL: &str   = "https://drive.atmospherium.space/public/updater/.minecraft/";
@@ -118,8 +119,16 @@ pub async fn sync_versions(app_handle: tauri::AppHandle) -> Result<(), String> {
                     let mut attempts = 0;
                     let max_retries = 3;
 
-                    let normalized_path = path.replace('\\', "/").trim_start_matches('/').to_string();
-                    let url = format!("{}/{}", DOWNLOAD_BASE_URL.trim_end_matches('/'), normalized_path).replace(' ', "%20");
+                    let encoded_path = path
+                        .replace('\\', "/")
+                        .split('/')
+                        .map(|segment| encode(segment).into_owned())
+                        .collect::<Vec<String>>()
+                        .join("/");
+
+                    let url = format!("{}/{}", DOWNLOAD_BASE_URL.trim_end_matches('/'), encoded_path);
+                    println!("{}", url);
+
                     let dest = b_dir.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
 
                     loop {
