@@ -44,7 +44,10 @@ onMounted(async () => {
     'download-progress',
     (event) => {
       const { current, total } = event.payload;
-      statusText.value = `正在更新资源文件 (${current}/${total})`;
+      if (total > 0) {
+        statusText.value = `正在更新资源文件 (${current}/${total})`;
+      }
+      statusText.value = `检测到新版本，正在更新...`;
     }
   );
 

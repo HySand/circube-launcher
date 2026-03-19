@@ -1,11 +1,11 @@
 use crate::models::*;
 use regex::Regex;
-use std::process::Command;
-use sysinfo::System;
-use std::path::PathBuf;
 use std::collections::HashSet;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+use std::path::PathBuf;
+use std::process::Command;
+use sysinfo::System;
 
 #[tauri::command]
 pub fn get_total_memory() -> u64 {
@@ -26,11 +26,14 @@ pub fn parse_java_display_name(full_output: &str) -> String {
     let fallback_regex = Regex::new(r#"(?i)build\s+"?([\d\._]+)"?"#).unwrap();
 
     let mut version_num = if let Some(cap) = version_regex.captures(full_output) {
-        cap.get(1).map_or("??".to_string(), |m| m.as_str().to_string())
+        cap.get(1)
+            .map_or("??".to_string(), |m| m.as_str().to_string())
     } else if let Some(cap) = fallback_regex.captures(full_output) {
-        cap.get(1).map_or("??".to_string(), |m| m.as_str().to_string())
+        cap.get(1)
+            .map_or("??".to_string(), |m| m.as_str().to_string())
     } else {
-        Regex::new(r#"(\d+\.\d+[\d\._]*)"#).unwrap()
+        Regex::new(r#"(\d+\.\d+[\d\._]*)"#)
+            .unwrap()
             .captures(full_output)
             .and_then(|cap| cap.get(1))
             .map_or("??".to_string(), |m| m.as_str().to_string())
@@ -40,17 +43,29 @@ pub fn parse_java_display_name(full_output: &str) -> String {
     if version_num.starts_with("1.8") {
         version_num = "8".to_string();
     } else {
-        version_num = version_num.split('.').next().unwrap_or(&version_num).to_string();
+        version_num = version_num
+            .split('.')
+            .next()
+            .unwrap_or(&version_num)
+            .to_string();
     }
 
     let content_upper = full_output.to_uppercase();
-    let vendor = if content_upper.contains("ZULU") { "Zulu" }
-        else if content_upper.contains("GRAALVM") { "GraalVM" }
-        else if content_upper.contains("MICROSOFT") { "Microsoft" }
-        else if content_upper.contains("CORRETTO") { "Corretto" }
-        else if content_upper.contains("TEMURIN") || content_upper.contains("ADOPTIUM") { "Temurin" }
-        else if content_upper.contains("ORACLE") { "Oracle" }
-        else { "OpenJDK" };
+    let vendor = if content_upper.contains("ZULU") {
+        "Zulu"
+    } else if content_upper.contains("GRAALVM") {
+        "GraalVM"
+    } else if content_upper.contains("MICROSOFT") {
+        "Microsoft"
+    } else if content_upper.contains("CORRETTO") {
+        "Corretto"
+    } else if content_upper.contains("TEMURIN") || content_upper.contains("ADOPTIUM") {
+        "Temurin"
+    } else if content_upper.contains("ORACLE") {
+        "Oracle"
+    } else {
+        "OpenJDK"
+    };
 
     format!("{} {}", vendor, version_num)
 }
@@ -72,14 +87,18 @@ pub async fn scan_java_environments() -> Vec<JavaInfo> {
     {
         cmd.creation_flags(0x08000000);
     }
-    if !cfg!(windows) { cmd.arg("-a"); }
+    if !cfg!(windows) {
+        cmd.arg("-a");
+    }
     cmd.arg(target_bin);
 
     if let Ok(output) = cmd.output() {
         let s = String::from_utf8_lossy(&output.stdout);
         for line in s.lines() {
             let p = PathBuf::from(line.trim());
-            if p.exists() { found_paths.insert(p); }
+            if p.exists() {
+                found_paths.insert(p);
+            }
         }
     }
 
@@ -87,7 +106,9 @@ pub async fn scan_java_environments() -> Vec<JavaInfo> {
     if let Ok(java_home) = std::env::var("JAVA_HOME") {
         let bin_name = if cfg!(windows) { "java.exe" } else { "java" };
         let p = PathBuf::from(java_home).join("bin").join(bin_name);
-        if p.exists() { found_paths.insert(p); }
+        if p.exists() {
+            found_paths.insert(p);
+        }
     }
 
     // 3. macOS 专属：使用系统专有工具 java_home 查询
@@ -101,7 +122,9 @@ pub async fn scan_java_environments() -> Vec<JavaInfo> {
                 if let Some(cap) = path_re.captures(line) {
                     if let Some(path_str) = cap.get(1) {
                         let p = PathBuf::from(path_str.as_str().trim()).join("bin/java");
-                        if p.exists() { found_paths.insert(p); }
+                        if p.exists() {
+                            found_paths.insert(p);
+                        }
                     }
                 }
             }
@@ -130,7 +153,7 @@ pub async fn scan_java_environments() -> Vec<JavaInfo> {
                 let display_name = parse_java_display_name(&full_text);
                 result.push(JavaInfo {
                     path: path.to_string_lossy().to_string(),
-                    version: display_name
+                    version: display_name,
                 });
             }
         }
@@ -183,11 +206,9 @@ pub fn validate_java(path: String) -> Result<JavaInfo, String> {
 
 #[tauri::command]
 pub async fn check_mc_directory() -> Result<bool, String> {
-    let exe_path = std::env::current_exe()
-        .map_err(|e| format!("无法获取程序路径: {}", e))?;
+    let exe_path = std::env::current_exe().map_err(|e| format!("无法获取程序路径: {}", e))?;
 
-    let current_dir = exe_path.parent()
-        .ok_or("无法获取父目录")?;
+    let current_dir = exe_path.parent().ok_or("无法获取父目录")?;
 
     let mc_path = current_dir.join(".minecraft");
 

@@ -7,8 +7,10 @@ mod updater;
 mod utils;
 
 use models::{AuthState, Config, UserInfo};
+use reqwest::Client;
 use std::fs;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
+use std::time::Duration;
 
 #[tauri::command]
 fn save_config(config: Config, state: tauri::State<'_, Mutex<Config>>) -> Result<(), String> {
@@ -46,11 +48,21 @@ fn logout_current_user(state: tauri::State<'_, Mutex<AuthState>>) -> bool {
 }
 
 fn main() {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(10))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .pool_max_idle_per_host(32)
+        .user_agent("CirCubeLauncher/2.0 (Windows NT 10.0; Win64; x64) reqwest/0.12")
+        .build()
+        .expect("Failed to create reqwest::Client");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .manage(client)
         .manage(Mutex::new(AuthState::load()))
         .manage(Mutex::new(Config::load()))
-        .manage(Arc::new(Mutex::new(AuthState::load())))
         .invoke_handler(tauri::generate_handler![
             auth::ms_login,
             auth::yggdrasil_login,

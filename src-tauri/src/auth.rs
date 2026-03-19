@@ -6,6 +6,8 @@ use std::sync::{Mutex};
 use tauri::Emitter;
 use tauri_plugin_opener::OpenerExt;
 use tauri::Manager;
+use reqwest::Client;
+
 
 pub const CLIENT_ID: &str = match option_env!("MS_CLIENT_ID") {
     Some(id) => id,
@@ -52,9 +54,9 @@ pub async fn process_user_info(
 
 #[tauri::command]
 pub async fn ms_login(
+    client: tauri::State<'_, Client>,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
-    let client = reqwest::Client::new();
     let params = [
         ("client_id", CLIENT_ID),
         ("tenant", "consumers"),
@@ -77,9 +79,9 @@ pub async fn ms_login(
     app.opener().open_url(&data.verification_uri, None::<String>).map_err(|e| e.to_string())?;
 
     let handle = app.clone();
+    let poll_client = client.inner().clone();
     tauri::async_runtime::spawn(async move {
         let poll_url = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
-        let poll_client = reqwest::Client::new();
 
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
@@ -99,7 +101,7 @@ pub async fn ms_login(
                     let access_token = body["access_token"].as_str().unwrap_or("");
                     let refresh_token = body["refresh_token"].as_str().unwrap_or("");
 
-                    if let Err(e) = authenticate_minecraft(access_token, refresh_token, handle.clone()).await {
+                    if let Err(e) = authenticate_minecraft(poll_client, access_token, refresh_token, handle.clone()).await {
                         handle.emit("ms-login-error", format!("验证失败: {}", e)).unwrap();
                     }
                     break;
@@ -120,11 +122,11 @@ pub async fn ms_login(
 }
 
 pub async fn authenticate_minecraft(
+    client: reqwest::Client,
     ms_access_token: &str,
     ms_refresh_token: &str,
     handle: tauri::AppHandle,
 ) -> Result<McProfile, String> {
-    let client = reqwest::Client::new();
 
     // --- Step 1: XBL ---
     println!("[Auth] Step 1: Requesting XBL Token...");
@@ -206,10 +208,10 @@ pub async fn authenticate_minecraft(
 
 #[tauri::command]
 pub async fn yggdrasil_login(
+    client: tauri::State<'_, Client>,
     payload: AuthPayload,
     state: tauri::State<'_, Mutex<AuthState>>,
 ) -> Result<AuthResponse, String> {
-    let client = reqwest::Client::new();
     let body = serde_json::json!({
         "agent": { "name": "Minecraft", "version": 1 },
         "username": payload.email,
@@ -244,10 +246,10 @@ pub async fn yggdrasil_login(
 
 #[tauri::command]
 pub async fn yggdrasil_select(
+    client: tauri::State<'_, Client>,
     payload: SelectPayload,
     state: tauri::State<'_, Mutex<AuthState>>,
 ) -> Result<UserInfo, String> {
-    let client = reqwest::Client::new();
     let res = client.post("https://littleskin.cn/api/yggdrasil/authserver/refresh")
         .json(&serde_json::json!({
             "accessToken": payload.access_token,
@@ -272,10 +274,9 @@ pub async fn ensure_authenticated(
     access_token: &str,
     state: &Mutex<AuthState>,
     handle: tauri::AppHandle,
+    client: tauri::State<'_, Client>,
 ) -> Result<(), String> {
-    let client = reqwest::Client::new();
-
-    match auth_type {
+      match auth_type {
         "Yggdrasil" => {
             let base_url = "https://littleskin.cn/api/yggdrasil/authserver";
 
@@ -323,10 +324,10 @@ pub async fn ensure_authenticated(
                             .ok_or("User credential not found in state")?
                     };
 
-                    let (new_ms_access, new_ms_refresh) = refresh_ms_token(&current_refresh_token).await
+                    let (new_ms_access, new_ms_refresh) = refresh_ms_token(client.clone(), &current_refresh_token).await
                         .map_err(|_| "MS_TOKEN_EXPIRED".to_string())?;
 
-                    authenticate_minecraft(&new_ms_access, &new_ms_refresh, handle).await?;
+                    authenticate_minecraft(client.inner().clone(), &new_ms_access, &new_ms_refresh, handle).await?;
 
                     Ok(())
                 },
@@ -334,8 +335,7 @@ pub async fn ensure_authenticated(
     }
 }
 
-pub async fn refresh_ms_token(refresh_token: &str) -> Result<(String, String), String> {
-    let client = reqwest::Client::new();
+pub async fn refresh_ms_token(client: tauri::State<'_, Client>, refresh_token: &str) -> Result<(String, String), String> {
     let url = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
 
     let params = [

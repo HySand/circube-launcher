@@ -1,21 +1,24 @@
 use crate::models::*;
-use std::path::{PathBuf, Path};
-use std::sync::Arc;
+use futures::StreamExt;
+use reqwest::Client;
+use sha1::{Digest, Sha1};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use tauri::Emitter;
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use sha1::{Sha1, Digest};
-use futures::StreamExt;
-use tauri::Emitter;
-use walkdir::WalkDir;
-use reqwest::Client;
 use urlencoding::encode;
+use walkdir::WalkDir;
 
 const REMOTE_MANIFEST_URL: &str = "https://gitee.com/hysand/CirCube/raw/main/manifest.json";
-const DOWNLOAD_BASE_URL: &str   = "https://drive.atmospherium.space/public/updater/.minecraft/";
+const DOWNLOAD_BASE_URL: &str = "https://drive.atmospherium.space/public/updater/.minecraft/";
 
 #[tauri::command]
-pub async fn sync_versions(app_handle: tauri::AppHandle) -> Result<(), String> {
+pub async fn sync_versions(
+    client: tauri::State<'_, Client>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
     // 1. 基础路径准备
     let exe_path = std::env::current_exe()
         .map_err(|e| e.to_string())?
@@ -34,14 +37,15 @@ pub async fn sync_versions(app_handle: tauri::AppHandle) -> Result<(), String> {
         if let Ok(content) = std::fs::read_to_string(&local_manifest_path) {
             if let Ok(local_manifest) = serde_json::from_str::<Manifest>(&content) {
                 final_version_dir = local_manifest.version;
-                println!("本地版本: {} ver {}", final_version_dir, local_manifest.manifest_version);
+                println!(
+                    "本地版本: {} ver {}",
+                    final_version_dir, local_manifest.manifest_version
+                );
             }
         }
     }
 
     // 3. 第二阶段：网络请求获取远程清单
-    let client = reqwest::Client::new();
-
     let remote_manifest: Manifest = client
         .get(REMOTE_MANIFEST_URL)
         .send()
@@ -54,9 +58,7 @@ pub async fn sync_versions(app_handle: tauri::AppHandle) -> Result<(), String> {
         })?
         .json::<Manifest>()
         .await
-        .map_err(|e| {
-            format!("JSON 解析失败 (结构不匹配或非合法 JSON): {}", e)
-        })?;
+        .map_err(|e| format!("JSON 解析失败 (结构不匹配或非合法 JSON): {}", e))?;
 
     final_version_dir = remote_manifest.version.clone();
     let _ = VERSION.set(final_version_dir.clone());
@@ -74,15 +76,25 @@ pub async fn sync_versions(app_handle: tauri::AppHandle) -> Result<(), String> {
     }
 
     if !needs_sync {
-        println!("版本已是最新 ({} ver {})，跳过下载。", final_version_dir, remote_manifest.manifest_version);
+        println!(
+            "版本已是最新 ({} ver {})，跳过下载。",
+            final_version_dir, remote_manifest.manifest_version
+        );
         return Ok(());
     }
+
+    let _ = app_handle.emit(
+        "download-progress",
+        ProgressPayload {
+            current: 0,
+            total: 0,
+            file: "/".to_string(),
+        },
+    );
 
     // 5. 第四阶段：构建下载队列
     let mut download_queue = Vec::new();
     for (rel_path, info) in &remote_manifest.files {
-        if rel_path.contains("options.txt") { continue; }
-
         let local_path = base_dir.join(rel_path.replace('/', std::path::MAIN_SEPARATOR_STR));
 
         let file_needs_update = if !local_path.exists() {
@@ -104,10 +116,10 @@ pub async fn sync_versions(app_handle: tauri::AppHandle) -> Result<(), String> {
         let total = download_queue.len();
         let counter = Arc::new(AtomicUsize::new(0));
         let semaphore = Arc::new(tokio::sync::Semaphore::new(5)); // 限制并发数
-        let client_arc = Arc::new(client);
+        let client_arc = client.inner();
 
-        let fetches = futures::stream::iter(
-            download_queue.into_iter().map(|(path, target_hash)| {
+        let fetches =
+            futures::stream::iter(download_queue.into_iter().map(|(path, target_hash)| {
                 let c = client_arc.clone();
                 let h = app_handle.clone();
                 let cnt = counter.clone();
@@ -126,7 +138,11 @@ pub async fn sync_versions(app_handle: tauri::AppHandle) -> Result<(), String> {
                         .collect::<Vec<String>>()
                         .join("/");
 
-                    let url = format!("{}/{}", DOWNLOAD_BASE_URL.trim_end_matches('/'), encoded_path);
+                    let url = format!(
+                        "{}/{}",
+                        DOWNLOAD_BASE_URL.trim_end_matches('/'),
+                        encoded_path
+                    );
                     println!("{}", url);
 
                     let dest = b_dir.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
@@ -135,11 +151,14 @@ pub async fn sync_versions(app_handle: tauri::AppHandle) -> Result<(), String> {
                         match download_file_streamed(&c, &url, &dest, &target_hash).await {
                             Ok(_) => {
                                 let current = cnt.fetch_add(1, Ordering::SeqCst) + 1;
-                                let _ = h.emit("download-progress", ProgressPayload {
-                                    current,
-                                    total,
-                                    file: path.clone()
-                                });
+                                let _ = h.emit(
+                                    "download-progress",
+                                    ProgressPayload {
+                                        current,
+                                        total,
+                                        file: path.clone(),
+                                    },
+                                );
                                 return Ok::<(), String>(());
                             }
                             Err(_e) if attempts < max_retries => {
@@ -150,11 +169,13 @@ pub async fn sync_versions(app_handle: tauri::AppHandle) -> Result<(), String> {
                         }
                     }
                 }
-            })
-        ).buffer_unordered(5);
+            }))
+            .buffer_unordered(5);
 
         let results: Vec<_> = fetches.collect().await;
-        for res in results { res?; }
+        for res in results {
+            res?;
+        }
     }
 
     // 7. 清理 mods 目录
@@ -162,13 +183,19 @@ pub async fn sync_versions(app_handle: tauri::AppHandle) -> Result<(), String> {
 
     // 8. 保存新清单
     save_local_manifest(&local_manifest_path, &remote_manifest).await?;
-    println!("同步完成，当前版本: {}", final_version_dir);
     Ok(())
 }
 
-async fn download_file_streamed(client: &Client, url: &str, dest: &PathBuf, expected_hash: &str) -> Result<(), String> {
+async fn download_file_streamed(
+    client: &Client,
+    url: &str,
+    dest: &PathBuf,
+    expected_hash: &str,
+) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|e| e.to_string())?;
     }
 
     let resp = client.get(url).send().await.map_err(|e| e.to_string())?;
@@ -194,7 +221,9 @@ async fn download_file_streamed(client: &Client, url: &str, dest: &PathBuf, expe
         return Err("Hash 校验失败，文件可能损坏".to_string());
     }
 
-    fs::rename(tmp_path, dest).await.map_err(|e| e.to_string())?;
+    fs::rename(tmp_path, dest)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -204,22 +233,31 @@ async fn calculate_sha1(path: &Path) -> tokio::io::Result<String> {
     let mut buffer = [0u8; 8192];
     loop {
         let n = file.read(&mut buffer).await?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         hasher.update(&buffer[..n]);
     }
     Ok(hex::encode(hasher.finalize()))
 }
 
 async fn cleanup_unused_mods(base_dir: &Path, version: &str, remote: &Manifest) {
-    let remote_mods_set: std::collections::HashSet<String> = remote.files.keys()
+    let remote_mods_set: std::collections::HashSet<String> = remote
+        .files
+        .keys()
         .filter(|k| k.contains("/mods/"))
         .map(|k| k.replace('\\', "/"))
         .collect();
 
     let mods_dir = base_dir.join("versions").join(version).join("mods");
-    if !mods_dir.exists() { return; }
+    if !mods_dir.exists() {
+        return;
+    }
 
-    let entries: Vec<_> = WalkDir::new(&mods_dir).into_iter().filter_map(|e| e.ok()).collect();
+    let entries: Vec<_> = WalkDir::new(&mods_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .collect();
     for entry in entries {
         if entry.file_type().is_file() {
             if let Ok(rel_path) = entry.path().strip_prefix(base_dir) {
