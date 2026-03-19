@@ -46,8 +46,9 @@ onMounted(async () => {
       const { current, total } = event.payload;
       if (total > 0) {
         statusText.value = `正在更新资源文件 (${current}/${total})`;
+      } else {
+        statusText.value = `检测到新版本，正在更新...`;
       }
-      statusText.value = `检测到新版本，正在更新...`;
     }
   );
 
