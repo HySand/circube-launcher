@@ -195,6 +195,19 @@ pub fn validate_java(path: String) -> Result<JavaInfo, String> {
 
             let display_name = parse_java_display_name(&full_text);
 
+            let version_re = Regex::new(r"(\d+)").unwrap();
+                        let major_version = version_re.captures(&display_name)
+                            .and_then(|cap| cap.get(1))
+                            .and_then(|m| m.as_str().parse::<u32>().ok())
+                            .ok_or_else(|| format!("无法解析 Java 主版本号: {}", display_name))?;
+
+                        if major_version < 17 || major_version > 21 {
+                            return Err(format!(
+                                "Java 版本不符合要求：检测到 Java {}，但当前游戏版本需要 Java 17 至 21 之间的环境。",
+                                major_version
+                            ));
+                        }
+
             Ok(JavaInfo {
                 path,
                 version: display_name,

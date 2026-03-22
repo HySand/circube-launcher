@@ -466,7 +466,7 @@ pub async fn launch_minecraft(
         }
         Err(err) => {
             emit_progress(&format!("Java 验证失败：{}", err));
-            return Err(format!("无法启动游戏：{}", err));
+            return Err(format!("Java 验证失败：{}", err));
         }
     }
 
