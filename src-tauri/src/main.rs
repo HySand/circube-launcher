@@ -49,7 +49,7 @@ fn logout_current_user(state: tauri::State<'_, Mutex<AuthState>>) -> bool {
 
 fn main() {
     let client = Client::builder()
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(300))
         .connect_timeout(Duration::from_secs(10))
         .pool_idle_timeout(Duration::from_secs(90))
         .pool_max_idle_per_host(32)
