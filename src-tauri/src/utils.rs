@@ -61,7 +61,7 @@ pub fn parse_java_display_name(full_output: &str) -> String {
         "Corretto"
     } else if content_upper.contains("TEMURIN") || content_upper.contains("ADOPTIUM") {
         "Temurin"
-    } else if content_upper.contains("ORACLE") {
+    } else if content_upper.contains("ORACLE") || content_upper.contains("HOTSPOT") {
         "Oracle"
     } else {
         "OpenJDK"

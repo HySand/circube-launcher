@@ -179,10 +179,7 @@ fn get_launcher_features(env: &HashMap<String, String>) -> HashMap<String, bool>
                 .get("${resolution_height}")
                 .map_or(false, |h| h != "480"),
     );
-    features.insert("has_quick_plays_support".to_string(), true);
-    features.insert("is_quick_play_singleplayer".to_string(), false);
-    features.insert("is_quick_play_multiplayer".to_string(), false);
-    features.insert("is_quick_play_realms".to_string(), false);
+    features.insert("has_quick_plays_support".to_string(), false);
     features
 }
 
@@ -357,10 +354,6 @@ pub async fn launch_minecraft(
     env.insert("${classpath}".to_string(), cp_str);
     env.insert("${resolution_width}".to_string(), "1600".to_string());
     env.insert("${resolution_height}".to_string(), "900".to_string());
-    env.insert("${quickPlayPath}".to_string(), "".to_string());
-    env.insert("${quickPlaySingleplayer}".to_string(), "".to_string());
-    env.insert("${quickPlayMultiplayer}".to_string(), "".to_string());
-    env.insert("${quickPlayRealms}".to_string(), "".to_string());
     env.insert(
         "${launcher_name}".to_string(),
         "CirCube Launcher".to_string(),
