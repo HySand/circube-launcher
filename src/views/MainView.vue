@@ -129,13 +129,13 @@ const handleLaunch = async () => {
     await invoke("launch_minecraft");
   } catch (e) {
     if (String(e).includes("TOKEN_EXPIRED")) {
-      toast.error("账户已过期，请重新登录", { duration: 1500 });
+      toast.error("账户已过期，请重新登录", { duration: 10000 });
       await invoke('logout_current_user')
       await router.push("/");
     } else if (String(e).includes("认证失败")) {
-      toast.error("认证失败，请检查您的网络", { duration: 1500 });
+      toast.error("认证失败，请检查您的网络", { duration: 10000 });
     } else {
-      toast.error("启动失败：" + e, { duration: 1500 });
+      toast.error("启动失败：" + e, { duration: 10000 });
     }
     isLaunching.value = false;
     console.error(e);

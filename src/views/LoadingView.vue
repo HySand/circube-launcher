@@ -37,7 +37,7 @@ onMounted(async () => {
   const hasMcDir = await invoke<boolean>('check_mc_directory');
   if (!hasMcDir) {
     statusText.value = "当前目录错误";
-    toast.error("请将软件放置在.minecraft文件夹同级目录", { duration: 3500 });
+    toast.error("请将软件放置在.minecraft文件夹同级目录", { duration: 10000 });
     return;
   }
   unlisten = await listen<{ current: number; total: number; file: string }>(
@@ -45,9 +45,12 @@ onMounted(async () => {
     (event) => {
       const { current, total } = event.payload;
       if (total > 0) {
-        statusText.value = `正在更新资源文件 (${current}/${total})`;
+        const label = event.payload.file?.startsWith("Minecraft") ? event.payload.file : "整合包资源";
+        statusText.value = `正在更新${label} (${current}/${total})`;
       } else {
-        statusText.value = `检测到新版本，正在更新...`;
+        statusText.value = event.payload.file && event.payload.file !== "/"
+          ? event.payload.file
+          : "检测到新版本，正在更新...";
       }
     }
   );
@@ -101,7 +104,7 @@ onMounted(async () => {
       console.error("更新失败:", e);
       statusText.value = "更新失败，尝试跳过...";
       await router.replace(currentUser ? "/main" : "/login");
-      toast.error("更新失败", { duration: 1500 });
+      toast.error("更新失败", { duration: 10000 });
       return;
     }
 

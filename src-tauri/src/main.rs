@@ -77,6 +77,7 @@ fn main() {
             utils::scan_java_environments,
             utils::validate_java,
             utils::check_mc_directory,
+            updater::get_manifest_versions,
             updater::sync_versions
         ])
         .run(tauri::generate_context!())

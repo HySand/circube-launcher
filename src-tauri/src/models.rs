@@ -70,6 +70,7 @@ pub struct Profile {
 pub struct McProfile {
     pub id: String,
     pub name: String,
+    #[serde(default)]
     pub skins: Vec<Skin>,
 }
 
@@ -99,7 +100,9 @@ pub struct DeviceCodeResponse {
     pub user_code: String,
     pub device_code: String,
     pub verification_uri: String,
+    pub verification_uri_complete: Option<String>,
     pub interval: u64,
+    pub expires_in: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -141,6 +144,21 @@ pub struct Manifest {
     pub manifest_version: String,
     pub version: String,
     pub files: std::collections::HashMap<String, FileItem>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestInfo {
+    pub version: String,
+    pub manifest_version: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestVersions {
+    pub local: Option<ManifestInfo>,
+    pub remote: ManifestInfo,
+    pub needs_update: bool,
 }
 
 #[derive(Deserialize, Serialize, Clone)]

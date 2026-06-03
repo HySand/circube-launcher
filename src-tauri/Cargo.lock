@@ -446,6 +446,7 @@ name = "circube-launcher"
 version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
+ "chrono",
  "dirs-next",
  "futures",
  "hex",

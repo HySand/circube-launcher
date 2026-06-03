@@ -14,9 +14,9 @@ if "%MANIFEST_VER%"=="" goto :input_manifest_ver
 set /p "APP_VER=请输入当前版本名 (version): "
 if "%APP_VER%"=="" goto :input_app_ver
 
-set "TARGET_DIR=public/updater/.minecraft"
-set "OUTPUT_FILE=public/updater/launcher/manifest.json"
-set "ZIP_FILE=public/CirCube.zip"
+set "TARGET_DIR=public\updater\.minecraft"
+set "OUTPUT_FILE=public\updater\launcher\manifest.json"
+set "ZIP_FILE=public\CirCube.7z"
 
 echo [System] 正在扫描: %TARGET_DIR%...
 
@@ -32,17 +32,19 @@ echo [成功] 清单已生成至: %OUTPUT_FILE%
 
 echo [System] 正在打包 updater...
 
-if exist "%ZIP_FILE%" del "%ZIP_FILE%"
+if exist "%ZIP_FILE%" (
+    echo Deleting existing archive: "%ZIP_FILE%"
+    del /f /q "%ZIP_FILE%"
+)
 
-pwsh -NoProfile -Command ^
-"Compress-Archive -Path 'public/updater/*' -DestinationPath '%ZIP_FILE%' -Force"
+"C:\Program Files\7-Zip\7z.exe" a -t7z -mx9 -m0=lzma2 -md=1024m -mfb=273 -ms=on -mtc=on "%ZIP_FILE%" "./public/updater/*"
 
 echo [成功] 已生成: %ZIP_FILE%
 
 echo ------------------------------------------------------
 echo [System] 上传到 R2...
 
-rclone sync ./public R2:circube/public --local-encoding None --s3-encoding None --transfers=8 --checkers=16 --progress --stats-one-line
+rclone sync ./public R2:circube/public --local-encoding None --s3-encoding None --transfers=8 --checkers=16 --progress --stats-one-line --retries 3
 
 echo [成功] R2 同步完成
 

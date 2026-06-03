@@ -142,6 +142,7 @@ const selectionContext = ref<{ accessToken: string, clientToken: string } | null
 
 let unlistenStatus: UnlistenFn | null = null
 let unlistenSuccess: UnlistenFn | null = null
+let unlistenError: UnlistenFn | null = null
 
 onMounted(async () => {
   // 统一事件监听逻辑
@@ -149,7 +150,7 @@ onMounted(async () => {
     const msg = typeof event.payload === 'string' ? event.payload : event.payload.message
     msLoadingText.value = msg
     if (msg.includes("错误")) {
-      toast.error(msg, { duration: 1500 })
+      toast.error(msg, { duration: 10000 })
       isMsLoading.value = false
       deviceCode.value = ""
     }
@@ -162,17 +163,18 @@ onMounted(async () => {
     router.push('/')
   })
 
-  unlistenSuccess = await listen<any>('ms-login-error', () => {
+  unlistenError = await listen<any>('ms-login-error', (event) => {
     isMsLoading.value = false
     deviceCode.value = ""
-    toast.error("微软登录失败！", { duration: 1500 })
-    router.push('/')
+    const msg = typeof event.payload === 'string' ? event.payload : '微软登录失败'
+    toast.error(msg, { duration: 10000 })
   })
 })
 
 onUnmounted(() => {
   if (unlistenStatus) unlistenStatus()
   if (unlistenSuccess) unlistenSuccess()
+  if (unlistenError) unlistenError()
 })
 
 const copyToClipboard = async (text: string) => {
@@ -197,12 +199,12 @@ const loginWithMicrosoft = async () => {
   }
   catch (err) {
     isMsLoading.value = false;
-    toast.error("初始化失败: " + err, { duration: 1500 });
+    toast.error("初始化失败: " + err, { duration: 10000 });
   }
 };
 
 const loginWithYggdrasil = async () => {
-  if (!authForm.email || !authForm.password) { toast.error("请输入账号密码", { duration: 1500 }); return; }
+  if (!authForm.email || !authForm.password) { toast.error("请输入账号密码", { duration: 10000 }); return; }
   isLoading.value = true
   try {
     const res = await invoke<AuthResponse>('yggdrasil_login', { payload: { ...authForm } })
@@ -213,7 +215,7 @@ const loginWithYggdrasil = async () => {
       showProfileSelector.value = true
     }
   } catch (err: any) {
-    toast.error("登录失败: " + err, { duration: 1500 })
+    toast.error("登录失败: " + err, { duration: 10000 })
   } finally { isLoading.value = false; }
 }
 
@@ -229,7 +231,7 @@ const selectProfile = async (profile: any) => {
       }
     })
     await router.push('/')
-  } catch (err) { toast.error("角色选择失败: " + err, { duration: 1500 }); }
+  } catch (err) { toast.error("角色选择失败: " + err, { duration: 10000 }); }
   finally { isLoading.value = false; }
 }
 

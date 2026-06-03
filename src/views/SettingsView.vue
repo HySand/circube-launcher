@@ -122,6 +122,51 @@
           </div>
         </transition>
       </section>
+
+      <section class="space-y-4">
+        <div class="flex items-center justify-between px-1">
+          <h3 class="text-[11px] font-black text-slate-400 uppercase tracking-[0.2em]">整合包版本</h3>
+          <button @click="loadManifestVersions" :disabled="isCheckingManifest || isUpdatingPack"
+                  class="text-[10px] font-black text-blue-600 hover:text-blue-700 uppercase disabled:opacity-30">
+            {{ isCheckingManifest ? '检查中' : '刷新' }}
+          </button>
+        </div>
+
+        <div class="rounded-2xl border border-slate-100 bg-slate-50/50 p-5 space-y-4">
+          <div class="grid grid-cols-2 gap-3">
+            <div class="space-y-1 overflow-hidden">
+              <p class="text-[9px] font-black text-slate-300 uppercase tracking-widest">本地</p>
+              <p class="text-[12px] font-black text-slate-700 truncate">
+                {{ manifestVersions?.local?.version || '未安装' }}
+              </p>
+              <p class="text-[9px] text-slate-400 font-mono truncate">
+                {{ manifestVersions?.local?.manifestVersion || '-' }}
+              </p>
+            </div>
+            <div class="space-y-1 overflow-hidden text-right">
+              <p class="text-[9px] font-black text-slate-300 uppercase tracking-widest">Gitee</p>
+              <p class="text-[12px] font-black text-slate-700 truncate">
+                {{ manifestVersions?.remote.version || '-' }}
+              </p>
+              <p class="text-[9px] text-slate-400 font-mono truncate">
+                {{ manifestVersions?.remote.manifestVersion || '-' }}
+              </p>
+            </div>
+          </div>
+
+          <Button v-if="manifestVersions?.needsUpdate" @click="handlePackUpdate" :disabled="isUpdatingPack"
+                  class="w-full h-11 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-black tracking-[0.2em]">
+            <RefreshCw :size="14" :class="cn('mr-2', isUpdatingPack && 'animate-spin')" />
+            {{ isUpdatingPack ? '跳转中' : '前往更新' }}
+          </Button>
+          <p v-else-if="manifestVersions" class="text-[10px] font-bold text-emerald-600 text-center py-2">
+            已是最新版本
+          </p>
+          <p v-else class="text-[10px] font-bold text-slate-300 text-center py-2">
+            等待检查
+          </p>
+        </div>
+      </section>
     </div>
 
     <footer class="p-6 border-t border-slate-100 bg-white/80 flex-none">
@@ -135,7 +180,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { ArrowLeft as ArrowLeftIcon, Check, ChevronsUpDown } from 'lucide-vue-next'
+import { ArrowLeft as ArrowLeftIcon, Check, ChevronsUpDown, RefreshCw } from 'lucide-vue-next'
 import { useCacheStore } from '@/stores/cache'
 import { invoke } from "@tauri-apps/api/core"
 import { toast } from 'vue-sonner'
@@ -162,6 +207,8 @@ const updateWidth = () => {
 const open = ref(false)
 const isManualMem = ref(false)
 const isTuning = ref(false)
+const isCheckingManifest = ref(false)
+const isUpdatingPack = ref(false)
 
 const config = ref({
   javaPath: cache.settings?.javaPath || '',
@@ -178,6 +225,26 @@ const maxSafeMemory = computed(() => Math.max(512, totalSystemMem.value - curren
 const otherUsedPercent = computed(() => (currentUsedMem.value / totalSystemMem.value) * 100)
 const gamePercent = computed(() => (config.value.maxMemory / totalSystemMem.value) * 100)
 const freeMemAfterAlloc = computed(() => Math.max(0, totalSystemMem.value - currentUsedMem.value - config.value.maxMemory))
+
+interface ManifestInfo { version: string; manifestVersion: string }
+interface ManifestVersions { local: ManifestInfo | null; remote: ManifestInfo; needsUpdate: boolean }
+const manifestVersions = ref<ManifestVersions | null>(null)
+
+const loadManifestVersions = async () => {
+  isCheckingManifest.value = true
+  try {
+    manifestVersions.value = await invoke<ManifestVersions>('get_manifest_versions')
+  } catch (error) {
+    toast.error("整合包版本检查失败: " + error, { duration: 10000 })
+  } finally {
+    isCheckingManifest.value = false
+  }
+}
+
+const handlePackUpdate = async () => {
+  isUpdatingPack.value = true
+  await router.push('/')
+}
 
 const performAutoTune = async () => {
   try {
@@ -264,6 +331,7 @@ onMounted(async () => {
     }
   });
 
+  await loadManifestVersions()
 })
 
 onUnmounted(() => resizeObserver?.disconnect())
@@ -287,14 +355,14 @@ const handleManualImport = async () => {
     const fileName = selected.split(/[\\/]/).pop()?.toLowerCase();
 
     if (fileName !== targetName) {
-      toast.error(`该文件可能不是java`, { duration: 1500 });
+      toast.error(`该文件可能不是java`, { duration: 10000 });
       return;
     }
     const javaInfo: JavaInfo = await invoke('validate_java', { path: selected });
 
     const isExisted = javaDetailList.value.some(j => j.path === javaInfo.path);
     if (isExisted) {
-      toast.error("该 Java 环境已存在", { duration: 1500 });
+      toast.error("该 Java 环境已存在", { duration: 10000 });
       return;
     }
 
@@ -303,7 +371,7 @@ const handleManualImport = async () => {
 
   } catch (error) {
     // 错误处理：如果 validate_java 返回 Err，会进入这里
-    toast.error("Java 验证失败: " + error, { duration: 1500 });
+    toast.error("Java 验证失败: " + error, { duration: 10000 });
   }
 }
 </script>

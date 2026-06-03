@@ -22,10 +22,18 @@ pub struct VersionConfig {
     #[serde(rename = "mainClass")]
     pub main_class: String,
     pub libraries: Vec<Library>,
+    #[serde(rename = "javaVersion")]
+    pub java_version: Option<JavaVersion>,
     #[serde(rename = "assetIndex")]
     pub asset_index: Option<AssetIndex>,
     #[serde(rename = "assets")]
     pub assets: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct JavaVersion {
+    #[serde(rename = "majorVersion")]
+    pub major_version: Option<u32>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -35,13 +43,14 @@ pub struct AssetIndex {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Library {
-    pub downloads: LibraryDownloads,
+    pub name: Option<String>,
+    pub downloads: Option<LibraryDownloads>,
     pub rules: Option<Vec<Rule>>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct LibraryDownloads {
-    pub artifact: Artifact,
+    pub artifact: Option<Artifact>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -183,6 +192,32 @@ fn get_launcher_features(env: &HashMap<String, String>) -> HashMap<String, bool>
     features
 }
 
+fn parse_java_major_from_display(display_name: &str) -> Option<u32> {
+    display_name
+        .split_whitespace()
+        .rev()
+        .find_map(|part| part.parse::<u32>().ok())
+}
+
+fn library_path_from_name(name: &str) -> Option<String> {
+    let (coords, ext) = name.split_once('@').unwrap_or((name, "jar"));
+    let parts: Vec<&str> = coords.split(':').collect();
+    if parts.len() < 3 {
+        return None;
+    }
+
+    let group = parts[0].replace('.', "/");
+    let artifact = parts[1];
+    let version = parts[2];
+    let classifier = parts.get(3).copied();
+    let file_name = match classifier {
+        Some(classifier) => format!("{}-{}-{}.{}", artifact, version, classifier, ext),
+        None => format!("{}-{}.{}", artifact, version, ext),
+    };
+
+    Some(format!("{}/{}/{}/{}", group, artifact, version, file_name))
+}
+
 #[tauri::command]
 pub async fn launch_minecraft(
     client: tauri::State<'_, Client>,
@@ -294,11 +329,19 @@ pub async fn launch_minecraft(
             }
         }
 
-        let path_str = &lib.downloads.artifact.path;
-        let lib_path = libs_base.join(path_str);
+        let artifact_path = lib
+            .downloads
+            .as_ref()
+            .and_then(|downloads| downloads.artifact.as_ref())
+            .map(|artifact| artifact.path.clone())
+            .or_else(|| lib.name.as_deref().and_then(library_path_from_name));
 
-        if lib_path.exists() {
-            cp_list.push(lib_path.to_string_lossy().to_string());
+        if let Some(path_str) = artifact_path {
+            let lib_path = libs_base.join(path_str);
+
+            if lib_path.exists() {
+                cp_list.push(lib_path.to_string_lossy().to_string());
+            }
         }
     }
 
@@ -453,8 +496,21 @@ pub async fn launch_minecraft(
 
     emit_progress("正在验证 JAVA...");
     let java_path_str: String = java_path.clone();
+    let required_java_major = ver_cfg
+        .java_version
+        .as_ref()
+        .and_then(|v| v.major_version)
+        .unwrap_or(21);
     match validate_java(java_path_str) {
         Ok(info) => {
+            let detected_java_major = parse_java_major_from_display(&info.version)
+                .ok_or_else(|| format!("无法解析 Java 主版本号: {}", info.version))?;
+            if detected_java_major < required_java_major {
+                return Err(format!(
+                    "Java 版本不符合要求：当前版本需要 Java {}，检测到 {}。",
+                    required_java_major, info.version
+                ));
+            }
             emit_progress(&format!("Java 校验通过：{} ({})", info.version, info.path));
         }
         Err(err) => {
