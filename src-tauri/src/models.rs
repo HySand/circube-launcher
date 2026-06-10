@@ -39,7 +39,7 @@ impl Config {
             .and_then(|data| serde_json::from_str(&data).ok())
             .unwrap_or(Config {
                 java_path: "".into(),
-                max_memory: 4096,
+                max_memory: 0,
             })
     }
 
