@@ -1,8 +1,8 @@
 <template>
-  <div class="h-full flex flex-col items-center justify-center bg-white animate-fade-in gap-4">
+  <div class="h-full flex flex-col items-center justify-center bg-white animate-fade-in gap-5">
     <Spinner class="text-blue-700" />
 
-    <p class="text-sm text-gray-500 font-medium tracking-tight animate-pulse min-h-[1.25rem]">
+    <p class="text-base text-gray-500 font-medium tracking-tight animate-pulse min-h-[1.5rem]">
       {{ statusText }}
     </p>
   </div>

@@ -1,13 +1,13 @@
 <template>
-  <div class="h-full flex flex-col bg-white px-8 pt-4 pb-6 overflow-hidden select-none">
-    <header class="mb-4 flex items-start justify-between">
-      <h2 class="text-2xl font-black text-slate-800 tracking-tighter leading-none">
+  <div class="h-full flex flex-col bg-white px-10 pt-5 pb-7 overflow-hidden select-none">
+    <header class="mb-5 flex items-start justify-between">
+      <h2 class="text-3xl font-black text-slate-800 tracking-tighter leading-none">
         你好, <span class="text-blue-600">{{ username }}</span>
       </h2>
 
       <button @click="handleSettings"
-        class="p-2.5 bg-slate-50 hover:bg-slate-100 text-slate-400 hover:text-blue-600 rounded-xl transition-all duration-300 active:scale-90 group border border-slate-100/50">
-        <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 group-hover:rotate-90 transition-transform duration-500"
+        class="p-3 bg-slate-50 hover:bg-slate-100 text-slate-400 hover:text-blue-600 rounded-2xl transition-all duration-300 active:scale-90 group border border-slate-100/50">
+        <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 group-hover:rotate-90 transition-transform duration-500"
           viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
           stroke-linejoin="round">
           <path
@@ -17,33 +17,33 @@
       </button>
     </header>
 
-    <div class="mb-4 min-h-[48px] flex flex-col justify-center">
-      <p v-if="quote.text" class="text-slate-400 text-[11px] leading-relaxed italic font-medium line-clamp-2">
+    <div class="mb-5 min-h-[58px] flex flex-col justify-center">
+      <p v-if="quote.text" class="text-slate-400 text-[13px] leading-relaxed italic font-medium line-clamp-2">
         " {{ quote.text }} "
       </p>
-      <p v-if="quote.from" class="text-[9px] text-slate-300 mt-1 font-bold uppercase tracking-wider text-right w-full">
+      <p v-if="quote.from" class="text-[11px] text-slate-300 mt-1.5 font-bold uppercase tracking-wider text-right w-full">
         — 《{{ quote.from }}》
       </p>
     </div>
 
     <div class="flex-1 flex justify-center items-center min-h-0">
       <div
-        class="h-full aspect-[1/2] bg-slate-50/50 rounded-[48px] border border-slate-100 flex items-center justify-center relative overflow-hidden group shadow-inner transition-all duration-500 hover:bg-white hover:border-blue-100">
+        class="h-full aspect-[1/2] bg-slate-50/50 rounded-[58px] border border-slate-100 flex items-center justify-center relative overflow-hidden group shadow-inner transition-all duration-500 hover:bg-white hover:border-blue-100">
         <div class="absolute inset-0 bg-gradient-to-br from-blue-50/20 via-transparent to-slate-100/30"></div>
-        <div ref="container" class="z-10 pt-4 flex flex-col items-center"></div>
+        <div ref="container" class="z-10 pt-5 flex flex-col items-center"></div>
       </div>
     </div>
 
-    <div class="mt-8 flex flex-col items-center gap-2">
-      <p v-if="isLaunching" class="text-[10px] text-blue-500 font-bold animate-pulse tracking-widest uppercase">
+    <div class="mt-10 flex flex-col items-center gap-2.5">
+      <p v-if="isLaunching" class="text-[12px] text-blue-500 font-bold animate-pulse tracking-widest uppercase">
         {{ launchStatus }}
       </p>
       <button @click="handleLaunch" :disabled="isLaunching"
-        class="w-full py-5 text-white rounded-[24px] text-[15px] font-black tracking-widest shadow-lg transition-all duration-300 active:scale-95 flex items-center justify-center gap-3 group"
+        class="w-full py-6 text-white rounded-[29px] text-[18px] font-black tracking-widest shadow-lg transition-all duration-300 active:scale-95 flex items-center justify-center gap-4 group"
         :class="[isLaunching ? 'bg-slate-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 shadow-blue-100']">
         <template v-if="!isLaunching">
           <span>CirCube 启动！</span>
-          <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 group-hover:translate-y-[-2px] transition-transform"
+          <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 group-hover:translate-y-[-2px] transition-transform"
             viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"
             stroke-linejoin="round">
             <path d="m5 12 7-7 7 7" />
@@ -51,7 +51,7 @@
           </svg>
         </template>
         <template v-else>
-          <svg class="animate-spin h-5 w-5 text-white" fill="none" viewBox="0 0 24 24">
+          <svg class="animate-spin h-6 w-6 text-white" fill="none" viewBox="0 0 24 24">
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
             <path class="opacity-75" fill="currentColor"
               d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z">
@@ -92,8 +92,8 @@ onMounted(async () => {
   if (container.value && skinUrl.value) {
     viewer = new skinview3d.SkinViewer({
       canvas: document.createElement('canvas'),
-      width: 260,
-      height: 320,
+      width: 312,
+      height: 384,
       skin: skinUrl.value
     });
     container.value.appendChild(viewer.canvas);

@@ -1,22 +1,22 @@
 <template>
-  <div class="h-full flex flex-col p-8 bg-white pt-4 animate-fade-in overflow-hidden select-none">
-    <div class="flex-1 flex flex-col gap-6">
+  <div class="h-full flex flex-col p-10 bg-white pt-5 animate-fade-in overflow-hidden select-none">
+    <div class="flex-1 flex flex-col gap-7">
 
       <div
-        class="bg-slate-50/50 rounded-[32px] border border-slate-100 p-6 flex flex-col group transition-all duration-500 hover:bg-white hover:shadow-2xl hover:shadow-blue-500/10 hover:border-blue-100">
-        <div class="flex items-center justify-between mb-4">
-          <div class="flex items-center gap-2">
-            <div class="w-1.5 h-1.5 bg-blue-500 rounded-full shadow-[0_0_8px_rgba(59,130,246,0.5)]"></div>
-            <p class="text-[11px] font-black text-slate-800 uppercase tracking-widest">正版</p>
+        class="bg-slate-50/50 rounded-[38px] border border-slate-100 p-7 flex flex-col group transition-all duration-500 hover:bg-white hover:shadow-2xl hover:shadow-blue-500/10 hover:border-blue-100">
+        <div class="flex items-center justify-between mb-5">
+          <div class="flex items-center gap-2.5">
+            <div class="w-2 h-2 bg-blue-500 rounded-full shadow-[0_0_10px_rgba(59,130,246,0.5)]"></div>
+            <p class="text-[13px] font-black text-slate-800 uppercase tracking-widest">正版</p>
           </div>
-          <span class="text-[9px] text-slate-300 font-bold uppercase tracking-widest leading-none">MS-OAuth2</span>
+          <span class="text-[11px] text-slate-300 font-bold uppercase tracking-widest leading-none">MS-OAuth2</span>
         </div>
 
-        <div class="flex-1 flex flex-col justify-center items-center min-h-[130px]">
+        <div class="flex-1 flex flex-col justify-center items-center min-h-[156px]">
           <template v-if="!deviceCode">
             <div
-              class="w-8 h-8 bg-white rounded-xl flex items-center justify-center shadow-sm border border-slate-50 transition-all duration-500">
-              <svg viewBox="0 0 23 23" class="w-4 h-4">
+              class="w-10 h-10 bg-white rounded-2xl flex items-center justify-center shadow-sm border border-slate-50 transition-all duration-500">
+              <svg viewBox="0 0 23 23" class="w-5 h-5">
                 <path fill="#f3f3f3" d="M0 0h23v23H0z" />
                 <path fill="#f35325" d="M1 1h10v10H1z" />
                 <path fill="#81bc06" d="M12 1h10v10H12z" />
@@ -24,32 +24,32 @@
                 <path fill="#ffba08" d="M12 12h10v10H12z" />
               </svg>
             </div>
-            <div class="text-center mt-3 mb-5">
-              <p class="text-[11px] text-slate-600 uppercase tracking-tighter">微软账号</p>
-              <p class="text-[9px] text-slate-400 mt-0.5 font-medium">正版用户使用此方式</p>
+            <div class="text-center mt-3.5 mb-6">
+              <p class="text-[13px] text-slate-600 uppercase tracking-tighter">微软账号</p>
+              <p class="text-[11px] text-slate-400 mt-1 font-medium">正版用户使用此方式</p>
             </div>
             <button @click="loginWithMicrosoft" :disabled="isMsLoading"
-              class="w-full py-3.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-[11px] font-black tracking-[0.2em] transition-all active:scale-95 shadow-lg shadow-blue-100 disabled:bg-slate-200 disabled:shadow-none">
+              class="w-full py-4 bg-blue-600 hover:bg-blue-700 text-white rounded-2xl text-[13px] font-black tracking-[0.2em] transition-all active:scale-95 shadow-lg shadow-blue-100 disabled:bg-slate-200 disabled:shadow-none">
               {{ isMsLoading ? '获取中' : '登录' }}
             </button>
           </template>
 
-          <div v-else class="w-full flex flex-col items-center animate-in fade-in space-y-4">
-            <div class="flex flex-col items-center gap-1">
-              <p class="text-[10px] text-slate-600 font-bold uppercase">代码已复制到剪贴板</p>
+          <div v-else class="w-full flex flex-col items-center animate-in fade-in space-y-5">
+            <div class="flex flex-col items-center gap-1.5">
+              <p class="text-[12px] text-slate-600 font-bold uppercase">代码已复制到剪贴板</p>
             </div>
 
             <div @click="copyToClipboard(deviceCode)"
-              class="w-full py-1 bg-slate-50 border-2 border-dashed border-blue-200 rounded-2xl flex items-center justify-center group/code cursor-pointer hover:border-blue-400 hover:bg-white transition-all duration-300">
-              <span class="text-2xl font-black tracking-[0.3em] text-blue-600 transition-transform">
+              class="w-full py-1.5 bg-slate-50 border-2 border-dashed border-blue-200 rounded-2xl flex items-center justify-center group/code cursor-pointer hover:border-blue-400 hover:bg-white transition-all duration-300">
+              <span class="text-3xl font-black tracking-[0.3em] text-blue-600 transition-transform">
                 {{ deviceCode }}
               </span>
             </div>
 
-            <div class="flex flex-col items-center gap-2 pt-2">
-              <p class="text-[7px] text-slate-400 font-medium">请在自动打开的页面中输入验证码</p>
+            <div class="flex flex-col items-center gap-2.5 pt-2.5">
+              <p class="text-[9px] text-slate-400 font-medium">请在自动打开的页面中输入验证码</p>
               <button @click="deviceCode = ''; isMsLoading = false"
-                class="px-4 py-1 text-[9px] font-black text-slate-300 hover:text-blue-500 border border-transparent hover:border-blue-100 rounded-full uppercase transition-all tracking-tighter">
+                class="px-5 py-1.5 text-[11px] font-black text-slate-300 hover:text-blue-500 border border-transparent hover:border-blue-100 rounded-full uppercase transition-all tracking-tighter">
                 重新获取 ←
               </button>
             </div>
@@ -58,51 +58,51 @@
       </div>
 
       <div
-        class="flex-1 bg-slate-50/50 rounded-[32px] border border-slate-100 p-6 flex flex-col transition-all duration-500 hover:bg-white hover:shadow-2xl hover:shadow-emerald-500/10 hover:border-emerald-100 relative overflow-hidden">
-        <div class="flex items-center justify-between mb-4">
-          <div class="flex items-center gap-2">
-            <div class="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)]">
+        class="flex-1 bg-slate-50/50 rounded-[38px] border border-slate-100 p-7 flex flex-col transition-all duration-500 hover:bg-white hover:shadow-2xl hover:shadow-emerald-500/10 hover:border-emerald-100 relative overflow-hidden">
+        <div class="flex items-center justify-between mb-5">
+          <div class="flex items-center gap-2.5">
+            <div class="w-2 h-2 bg-emerald-500 rounded-full animate-pulse shadow-[0_0_10px_rgba(16,185,129,0.5)]">
             </div>
-            <p class="text-[11px] font-black text-slate-800 uppercase tracking-widest">离线</p>
+            <p class="text-[13px] font-black text-slate-800 uppercase tracking-widest">离线</p>
           </div>
-          <span class="text-[9px] text-slate-300 font-bold uppercase tracking-widest leading-none">Yggdrasil</span>
+          <span class="text-[11px] text-slate-300 font-bold uppercase tracking-widest leading-none">Yggdrasil</span>
         </div>
 
-        <div class="flex-1 relative min-h-[130px]">
+        <div class="flex-1 relative min-h-[156px]">
           <div v-if="!showProfileSelector"
-            class="absolute inset-0 flex flex-col justify-center space-y-2.5 animate-in fade-in duration-300">
-            <div class="space-y-1.5">
+            class="absolute inset-0 flex flex-col justify-center space-y-3 animate-in fade-in duration-300">
+            <div class="space-y-2">
               <input v-model="authForm.email" type="text" placeholder="邮箱或用户名"
-                class="w-full px-4 py-2.5 bg-white border border-slate-100 rounded-xl text-[10px] font-medium focus:outline-none focus:border-emerald-500 transition-all" />
+                class="w-full px-5 py-3 bg-white border border-slate-100 rounded-2xl text-[12px] font-medium focus:outline-none focus:border-emerald-500 transition-all" />
               <input v-model="authForm.password" type="password" placeholder="密码"
-                class="w-full px-4 py-2.5 bg-white border border-slate-100 rounded-xl text-[10px] font-medium focus:outline-none focus:border-emerald-500 transition-all" />
+                class="w-full px-5 py-3 bg-white border border-slate-100 rounded-2xl text-[12px] font-medium focus:outline-none focus:border-emerald-500 transition-all" />
             </div>
-            <div class="flex gap-2">
+            <div class="flex gap-2.5">
               <button @click="loginWithYggdrasil" :disabled="isLoading"
-                class="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-[10px] font-black tracking-widest transition-all active:scale-95 shadow-lg shadow-emerald-100">
+                class="flex-1 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl text-[12px] font-black tracking-widest transition-all active:scale-95 shadow-lg shadow-emerald-100">
                 {{ isLoading ? '验证中' : '登录' }}
               </button>
               <button @click="openRegister"
-                class="px-3 py-2.5 bg-white border border-slate-100 text-slate-400 hover:text-slate-600 rounded-xl text-[10px] font-black transition-all">
+                class="px-4 py-3 bg-white border border-slate-100 text-slate-400 hover:text-slate-600 rounded-2xl text-[12px] font-black transition-all">
                 注册
               </button>
             </div>
           </div>
 
-          <div v-else class="absolute inset-0 flex flex-col space-y-2 animate-in slide-in-from-right-4 duration-500">
-            <p class="text-[8px] font-bold text-slate-400 uppercase tracking-tight text-center shrink-0">选择角色</p>
-            <div class="overflow-y-auto pr-1 space-y-1 custom-scrollbar">
+          <div v-else class="absolute inset-0 flex flex-col space-y-2.5 animate-in slide-in-from-right-4 duration-500">
+            <p class="text-[10px] font-bold text-slate-400 uppercase tracking-tight text-center shrink-0">选择角色</p>
+            <div class="overflow-y-auto pr-1.5 space-y-1.5 custom-scrollbar">
               <button v-for="profile in availableProfiles" :key="profile.id" @click="selectProfile(profile)"
-                class="w-full h-[44px] px-3 bg-white border border-slate-100 hover:border-emerald-500 rounded-xl flex items-center gap-2 transition-all group/profile shrink-0">
-                <div class="w-6 h-6 bg-slate-50 rounded flex-shrink-0 flex items-center justify-center">
+                class="w-full h-[53px] px-4 bg-white border border-slate-100 hover:border-emerald-500 rounded-2xl flex items-center gap-2.5 transition-all group/profile shrink-0">
+                <div class="w-7 h-7 bg-slate-50 rounded-md flex-shrink-0 flex items-center justify-center">
                   <img :src="`https://littleskin.cn/avatar/player/${profile.name}?size=48`"
                     class="w-full h-full object-contain" style="image-rendering: pixelated;" />
                 </div>
-                <span class="text-[9px] font-bold text-slate-600 truncate">{{ profile.name }}</span>
+                <span class="text-[11px] font-bold text-slate-600 truncate">{{ profile.name }}</span>
               </button>
             </div>
             <button @click="showProfileSelector = false"
-              class="w-full py-1 text-[8px] text-slate-300 hover:text-slate-500 uppercase transition-colors shrink-0">
+              class="w-full py-1.5 text-[10px] text-slate-300 hover:text-slate-500 uppercase transition-colors shrink-0">
               返回
             </button>
           </div>
@@ -110,8 +110,8 @@
       </div>
     </div>
 
-    <div class="mt-4 flex justify-between items-center px-2 shrink-0">
-      <span class="text-[8px] text-slate-200 font-bold uppercase tracking-[0.2em]">MADE BY ZEPHYR</span>
+    <div class="mt-5 flex justify-between items-center px-2.5 shrink-0">
+      <span class="text-[10px] text-slate-200 font-bold uppercase tracking-[0.2em]">MADE BY ZEPHYR</span>
     </div>
   </div>
 </template>

@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "CirCube Launcher",
-        "width": 360,
-        "height": 600,
+        "width": 432,
+        "height": 720,
         "resizable": false,
         "fullscreen": false,
         "decorations": false,
