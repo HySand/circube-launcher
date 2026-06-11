@@ -2,14 +2,20 @@
 import { defineStore } from 'pinia'
 
 interface JavaInfo { path: string; version: string }
+export type DownloadSource = 'overseas' | 'chinaCdn'
+export interface LauncherSettings { javaPath: string; maxMemory: number; downloadSource: DownloadSource }
+
+const defaultSettings = (): LauncherSettings => ({
+    javaPath: '',
+    maxMemory: 4096,
+    downloadSource: 'overseas',
+})
+
 export const useCacheStore = defineStore('cache', {
     state: () => ({
         user: null as {uuid: string ; name: string; accessToken: string; skinUrl: string; authType: string} | null,
         quote: { text: '', from: '' },
-        settings: {
-            javaPath: '',
-            maxMemory: 4096,
-        },
+        settings: defaultSettings(),
         totalMemory: 0,
         javaList: [] as JavaInfo[]
     }),
@@ -21,8 +27,8 @@ export const useCacheStore = defineStore('cache', {
         setQuote(quote: { text: string, from: string }) {
             this.quote = quote
         },
-        setSettings(settings: { javaPath: string, maxMemory: number }) {
-            this.settings = settings
+        setSettings(settings: LauncherSettings) {
+            this.settings = { ...defaultSettings(), ...settings }
         },
         clearUser() {
             this.user = null
@@ -37,7 +43,7 @@ export const useCacheStore = defineStore('cache', {
             this.quote = { text: '', from: '' }
         },
         clearSettings() {
-            this.settings = { javaPath: '', maxMemory: 4096 }
+            this.settings = defaultSettings()
         }
     }
 })

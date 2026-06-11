@@ -29,7 +29,7 @@ const fetchQuote = async () => {
 }
 
 interface UserInfo { uuid: string; name: string; accessToken: string; skinUrl: string; authType: string }
-interface Config { javaPath: string; maxMemory: number }
+interface Config { javaPath: string; maxMemory: number; downloadSource: 'overseas' | 'chinaCdn' }
 interface JavaInfo { path: string; version: string }
 
 onMounted(async () => {

@@ -125,6 +125,32 @@
 
       <section class="space-y-4">
         <div class="flex items-center justify-between px-1">
+          <h3 class="text-[11px] font-black text-slate-400 uppercase tracking-[0.2em]">下载源</h3>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <button type="button" @click="handleDownloadSourceSelect('overseas')"
+                  :class="cn('min-w-0 rounded-2xl border p-4 text-left transition-all active:scale-[0.98]', config.downloadSource === 'overseas' ? 'border-blue-200 bg-blue-50/70 text-blue-700 shadow-sm' : 'border-slate-100 bg-slate-50/50 text-slate-500 hover:bg-white hover:border-blue-100')">
+            <div class="flex min-w-0 items-center gap-2">
+              <Globe2 :size="16" class="shrink-0" />
+              <span class="truncate text-[11px] font-black">源站</span>
+            </div>
+            <p class="mt-2 truncate text-[9px] font-mono opacity-60">推荐，部分网络无法使用</p>
+          </button>
+
+          <button type="button" @click="handleDownloadSourceSelect('chinaCdn')"
+                  :class="cn('min-w-0 rounded-2xl border p-4 text-left transition-all active:scale-[0.98]', config.downloadSource === 'chinaCdn' ? 'border-blue-200 bg-blue-50/70 text-blue-700 shadow-sm' : 'border-slate-100 bg-slate-50/50 text-slate-500 hover:bg-white hover:border-blue-100')">
+            <div class="flex min-w-0 items-center gap-2">
+              <Cloud :size="16" class="shrink-0" />
+              <span class="truncate text-[11px] font-black">CDN</span>
+            </div>
+            <p class="mt-2 truncate text-[9px] font-mono opacity-60">限速，源站不可用时备用</p>
+          </button>
+        </div>
+      </section>
+
+      <section class="space-y-4">
+        <div class="flex items-center justify-between px-1">
           <h3 class="text-[11px] font-black text-slate-400 uppercase tracking-[0.2em]">整合包版本</h3>
           <button @click="loadManifestVersions" :disabled="isCheckingManifest || isUpdatingPack"
                   class="text-[10px] font-black text-blue-600 hover:text-blue-700 uppercase disabled:opacity-30">
@@ -144,7 +170,7 @@
               </p>
             </div>
             <div class="space-y-1 overflow-hidden text-right">
-              <p class="text-[9px] font-black text-slate-300 uppercase tracking-widest">Gitee</p>
+              <p class="text-[9px] font-black text-slate-300 uppercase tracking-widest">远程</p>
               <p class="text-[12px] font-black text-slate-700 truncate">
                 {{ manifestVersions?.remote.version || '-' }}
               </p>
@@ -180,8 +206,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { ArrowLeft as ArrowLeftIcon, Check, ChevronsUpDown, RefreshCw } from 'lucide-vue-next'
-import { useCacheStore } from '@/stores/cache'
+import { ArrowLeft as ArrowLeftIcon, Check, ChevronsUpDown, Cloud, Globe2, RefreshCw } from 'lucide-vue-next'
+import { useCacheStore, type DownloadSource } from '@/stores/cache'
 import { invoke } from "@tauri-apps/api/core"
 import { toast } from 'vue-sonner'
 import { cn } from '@/lib/utils'
@@ -212,7 +238,8 @@ const isUpdatingPack = ref(false)
 
 const config = ref({
   javaPath: cache.settings?.javaPath || '',
-  maxMemory: cache.settings?.maxMemory ?? 0
+  maxMemory: cache.settings?.maxMemory ?? 0,
+  downloadSource: cache.settings?.downloadSource ?? 'overseas'
 })
 
 const totalSystemMem = ref(cache.totalMemory)
@@ -275,6 +302,13 @@ const handleJavaSelect = async (path: string) => {
   config.value.javaPath = path
   await triggerSave()
   open.value = false
+}
+
+const handleDownloadSourceSelect = async (source: DownloadSource) => {
+  if (config.value.downloadSource === source) return
+  config.value.downloadSource = source
+  await triggerSave()
+  toast.success(source === 'chinaCdn' ? "已切换至CDN" : "已切换至源站", { duration: 1500 })
 }
 
 const handleSliderChange = (val: number[] | undefined) => {

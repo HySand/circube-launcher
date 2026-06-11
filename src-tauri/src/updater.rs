@@ -20,7 +20,6 @@ use walkdir::WalkDir;
 use std::os::windows::process::CommandExt;
 
 const REMOTE_MANIFEST_URL: &str = "https://gitee.com/hysand/CirCube/raw/main/manifest.json";
-const DOWNLOAD_BASE_URL: &str = "https://drive.996154.xyz/public/updater/.minecraft/";
 const BMCLAPI_BASE_URL: &str = "https://bmclapi2.bangbang93.com";
 
 #[derive(Deserialize)]
@@ -176,13 +175,14 @@ pub async fn sync_versions(
     let base_dir = exe_path.join(".minecraft");
     let launcher_dir = exe_path.join("launcher");
     let local_manifest_path = launcher_dir.join("manifest.json");
-    let java_path = {
+    let (java_path, download_base_url) = {
         let config = config_state.lock().unwrap();
-        if config.java_path.trim().is_empty() {
+        let java_path = if config.java_path.trim().is_empty() {
             "java".to_string()
         } else {
             config.java_path.clone()
-        }
+        };
+        (java_path, config.download_source.base_url().to_string())
     };
 
     let mut final_version_dir = String::from("UNKNOWN");
@@ -281,6 +281,7 @@ pub async fn sync_versions(
                 let cnt = counter.clone();
                 let sem = semaphore.clone();
                 let b_dir = base_dir.clone();
+                let base_url = download_base_url.clone();
 
                 async move {
                     let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
@@ -296,7 +297,7 @@ pub async fn sync_versions(
 
                     let url = format!(
                         "{}/{}",
-                        DOWNLOAD_BASE_URL.trim_end_matches('/'),
+                        base_url.trim_end_matches('/'),
                         encoded_path
                     );
                     println!("{}", url);

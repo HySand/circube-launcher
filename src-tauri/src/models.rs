@@ -22,6 +22,40 @@ pub struct SelectPayload {
 pub struct Config {
     pub java_path: String,
     pub max_memory: u64,
+    #[serde(default)]
+    pub download_source: DownloadSource,
+}
+
+#[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DownloadSource {
+    Overseas,
+    ChinaCdn,
+}
+
+impl Default for DownloadSource {
+    fn default() -> Self {
+        Self::Overseas
+    }
+}
+
+impl DownloadSource {
+    pub fn base_url(self) -> &'static str {
+        match self {
+            Self::Overseas => "https://drive.996154.xyz/public/updater/.minecraft/",
+            Self::ChinaCdn => "https://pan.996154.xyz/public/updater/.minecraft/",
+        }
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            java_path: "".into(),
+            max_memory: 0,
+            download_source: DownloadSource::default(),
+        }
+    }
 }
 
 impl Config {
@@ -37,10 +71,7 @@ impl Config {
         fs::read_to_string(Self::file_path())
             .ok()
             .and_then(|data| serde_json::from_str(&data).ok())
-            .unwrap_or(Config {
-                java_path: "".into(),
-                max_memory: 0,
-            })
+            .unwrap_or_default()
     }
 
     pub fn save(&self) -> std::io::Result<()> {
