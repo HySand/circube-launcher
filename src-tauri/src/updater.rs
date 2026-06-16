@@ -1,11 +1,13 @@
 use crate::models::*;
 use chrono::{SecondsFormat, Utc};
+use flate2::read::DeflateDecoder;
 use futures::StreamExt;
 use reqwest::Client;
-use sha1::{Digest, Sha1};
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::HashMap;
+use sha1::{Digest, Sha1};
+use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -29,6 +31,30 @@ struct MinecraftVersionMeta {
     asset_index: Option<AssetIndexInfo>,
     downloads: Option<VersionDownloads>,
     libraries: Vec<MinecraftLibrary>,
+}
+
+#[derive(Deserialize)]
+struct InstallerLibraries {
+    #[serde(default)]
+    libraries: Vec<MinecraftLibrary>,
+}
+
+#[derive(Deserialize)]
+struct InstallerProfile {
+    #[serde(default)]
+    data: HashMap<String, HashMap<String, String>>,
+    #[serde(default)]
+    processors: Vec<InstallerProcessor>,
+}
+
+#[derive(Deserialize)]
+struct InstallerProcessor {
+    jar: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    classpath: Vec<String>,
+    sides: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -129,10 +155,39 @@ fn local_manifest_path() -> Result<PathBuf, String> {
     Ok(exe_path.join("launcher").join("manifest.json"))
 }
 
+fn manifest_file_path(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    normalized
+        .strip_prefix(".minecraft/")
+        .or_else(|| normalized.strip_prefix("minecraft/"))
+        .unwrap_or(&normalized)
+        .to_string()
+}
+
+fn is_assets_index_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    normalized.starts_with("assets/indexes/") && normalized.ends_with(".json")
+}
+
+fn emit_progress(app_handle: &tauri::AppHandle, file: impl Into<String>) {
+    let _ = app_handle.emit(
+        "download-progress",
+        ProgressPayload {
+            current: 0,
+            total: 0,
+            file: file.into(),
+        },
+    );
+}
+
 #[tauri::command]
-pub async fn get_manifest_versions(client: tauri::State<'_, Client>) -> Result<ManifestVersions, String> {
+pub async fn get_manifest_versions(
+    client: tauri::State<'_, Client>,
+) -> Result<ManifestVersions, String> {
     let local = match std::fs::read_to_string(local_manifest_path()?) {
-        Ok(content) => serde_json::from_str::<Manifest>(&content).ok().map(|m| manifest_info(&m)),
+        Ok(content) => serde_json::from_str::<Manifest>(&content)
+            .ok()
+            .map(|m| manifest_info(&m)),
         Err(_) => None,
     };
 
@@ -150,7 +205,7 @@ pub async fn get_manifest_versions(client: tauri::State<'_, Client>) -> Result<M
     let remote = manifest_info(&remote_manifest);
     let needs_update = local
         .as_ref()
-        .map_or(true, |local| local.manifest_version != remote.manifest_version);
+        .map_or(true, |local| local.version != remote.version);
 
     Ok(ManifestVersions {
         local,
@@ -185,16 +240,16 @@ pub async fn sync_versions(
         (java_path, config.download_source.base_url().to_string())
     };
 
-    let mut final_version_dir = String::from("UNKNOWN");
+    let mut minecraft_version_dir = String::from("UNKNOWN");
 
     // 2. 第一阶段：尝试从本地清单读取保底版本
     if local_manifest_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&local_manifest_path) {
             if let Ok(local_manifest) = serde_json::from_str::<Manifest>(&content) {
-                final_version_dir = local_manifest.version;
+                minecraft_version_dir = local_manifest.manifest_version.clone();
                 println!(
-                    "本地版本: {} ver {}",
-                    final_version_dir, local_manifest.manifest_version
+                    "本地整合包版本: {} ver {}, Minecraft 版本目录: {}",
+                    local_manifest.version, local_manifest.manifest_version, minecraft_version_dir
                 );
             }
         }
@@ -208,22 +263,22 @@ pub async fn sync_versions(
         .map_err(|e| format!("网络请求失败: {}", e))?
         .error_for_status()
         .map_err(|e| {
-            let _ = VERSION.set(final_version_dir.clone());
+            let _ = VERSION.set(minecraft_version_dir.clone());
             format!("服务器响应异常: {}", e)
         })?
         .json::<Manifest>()
         .await
         .map_err(|e| format!("JSON 解析失败 (结构不匹配或非合法 JSON): {}", e))?;
 
-    final_version_dir = remote_manifest.version.clone();
-    let _ = VERSION.set(final_version_dir.clone());
+    minecraft_version_dir = remote_manifest.manifest_version.clone();
+    let _ = VERSION.set(minecraft_version_dir.clone());
 
     // 4. 第三阶段：版本对比逻辑
     let mut needs_sync = true;
     if local_manifest_path.exists() {
         if let Ok(content) = fs::read_to_string(&local_manifest_path).await {
             if let Ok(local_manifest) = serde_json::from_str::<Manifest>(&content) {
-                if local_manifest.manifest_version == remote_manifest.manifest_version {
+                if local_manifest.version == remote_manifest.version {
                     needs_sync = false;
                 }
             }
@@ -232,26 +287,36 @@ pub async fn sync_versions(
 
     if !needs_sync {
         println!(
-            "版本已是最新 ({} ver {})，跳过下载。",
-            final_version_dir, remote_manifest.manifest_version
+            "整合包已是最新 ({} ver {})，Minecraft 版本目录: {}，跳过下载。",
+            remote_manifest.version, remote_manifest.manifest_version, minecraft_version_dir
         );
-        ensure_minecraft_resources(&client, &app_handle, &base_dir, &final_version_dir, &java_path).await?;
+        ensure_minecraft_resources(
+            &client,
+            &app_handle,
+            &base_dir,
+            &minecraft_version_dir,
+            &java_path,
+            false,
+        )
+        .await?;
         return Ok(());
     }
 
-    let _ = app_handle.emit(
-        "download-progress",
-        ProgressPayload {
-            current: 0,
-            total: 0,
-            file: "/".to_string(),
-        },
-    );
+    emit_progress(&app_handle, "/");
 
     // 5. 第四阶段：构建下载队列
     let mut download_queue = Vec::new();
     for (rel_path, info) in &remote_manifest.files {
-        let local_path = base_dir.join(rel_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let normalized_path = manifest_file_path(rel_path);
+        if is_assets_index_path(&normalized_path) {
+            println!(
+                "[updater] skip manifest assets index marker during pack sync: {}",
+                normalized_path
+            );
+            continue;
+        }
+
+        let local_path = base_dir.join(normalized_path.replace('/', std::path::MAIN_SEPARATOR_STR));
 
         let file_needs_update = if !local_path.exists() {
             true
@@ -263,7 +328,7 @@ pub async fn sync_versions(
         };
 
         if file_needs_update {
-            download_queue.push((rel_path.clone(), info.hash.clone()));
+            download_queue.push((normalized_path, info.hash.clone()));
         }
     }
 
@@ -295,11 +360,7 @@ pub async fn sync_versions(
                         .collect::<Vec<String>>()
                         .join("/");
 
-                    let url = format!(
-                        "{}/{}",
-                        base_url.trim_end_matches('/'),
-                        encoded_path
-                    );
+                    let url = format!("{}/{}", base_url.trim_end_matches('/'), encoded_path);
                     println!("{}", url);
 
                     let dest = b_dir.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
@@ -336,10 +397,18 @@ pub async fn sync_versions(
     }
 
     // 7. 补全 Minecraft 官方资源
-    ensure_minecraft_resources(&client, &app_handle, &base_dir, &final_version_dir, &java_path).await?;
+    ensure_minecraft_resources(
+        &client,
+        &app_handle,
+        &base_dir,
+        &minecraft_version_dir,
+        &java_path,
+        needs_sync,
+    )
+    .await?;
 
     // 8. 清理 mods 目录
-    cleanup_unused_mods(&base_dir, &final_version_dir, &remote_manifest).await;
+    cleanup_unused_mods(&base_dir, &minecraft_version_dir, &remote_manifest).await;
 
     // 9. 保存新清单
     save_local_manifest(&local_manifest_path, &remote_manifest).await?;
@@ -352,25 +421,19 @@ async fn ensure_minecraft_resources(
     mc_dir: &Path,
     version: &str,
     java_path: &str,
+    force_resource_install: bool,
 ) -> Result<(), String> {
-    let emit = |file: &str| {
-        let _ = app_handle.emit(
-            "download-progress",
-            ProgressPayload {
-                current: 0,
-                total: 0,
-                file: file.to_string(),
-            },
-        );
-    };
-
-    emit(&format!("正在解析 Minecraft {} 资源", version));
+    emit_progress(app_handle, format!("正在解析 Minecraft {} 资源", version));
 
     let version_dir = mc_dir.join("versions").join(version);
     let version_json_path = version_dir.join(format!("{}.json", version));
     if !version_json_path.exists() {
-        let url = format!("{}/version/{}/json", BMCLAPI_BASE_URL, encode(version));
-        download_file_streamed(client, &url, &version_json_path, None).await?;
+        return Err(format!(
+            "缺少版本 JSON: {}。请确保 manifest.files 包含 versions/{}/{}.json 并已完成同步。",
+            version_json_path.display(),
+            version,
+            version
+        ));
     }
 
     let raw_json = fs::read_to_string(&version_json_path)
@@ -378,50 +441,106 @@ async fn ensure_minecraft_resources(
         .map_err(|e| format!("读取版本 JSON 失败: {}", e))?;
     let version_meta: MinecraftVersionMeta =
         serde_json::from_str(&raw_json).map_err(|e| format!("解析版本 JSON 失败: {}", e))?;
-    emit(&format!("{} 版本 JSON 已解析", version));
+    emit_progress(app_handle, format!("{} 版本 JSON 已解析", version));
 
-    if asset_index_matches(mc_dir, &version_meta).await? {
-        emit("Minecraft assets index 已匹配，跳过资源补全");
+    if !force_resource_install && asset_index_exists(mc_dir, &version_meta).await? {
         return Ok(());
     }
 
+    ensure_client_jar(client, app_handle, &version_dir, version, &version_meta).await?;
+
+    let _ = ensure_libraries(
+        client,
+        app_handle,
+        mc_dir,
+        &version_dir,
+        version,
+        &version_meta,
+    )
+    .await?;
+
     let prepared_assets = prepare_assets(client, mc_dir, &version_meta).await?;
 
-    if let Some(client_download) = version_meta.downloads.as_ref().and_then(|d| d.client.as_ref()) {
-        emit("正在检查 Minecraft client jar");
-        let client_jar_path = version_dir.join(format!("{}.jar", version));
-        let mut urls = vec![format!("{}/version/{}/client", BMCLAPI_BASE_URL, encode(version))];
-        if let Some(url) = &client_download.url {
-            urls.push(url.clone());
-        }
-        ensure_download_from_urls(
+    if let Some(prepared_assets) = prepared_assets {
+        let PreparedAssets {
+            index_path,
+            tmp_index_path,
+            backup_index_path,
+            jobs,
+        } = prepared_assets;
+        let _ = run_download_jobs(
             client,
-            &urls,
-            &client_jar_path,
-            client_download.sha1.as_deref(),
+            app_handle,
+            jobs,
+            "Minecraft assets",
         )
         .await?;
-    }
 
-    if let Some(prepared_assets) = prepared_assets {
-        run_download_jobs(client, app_handle, prepared_assets.jobs.clone(), "Minecraft assets").await?;
-        ensure_libraries(client, app_handle, mc_dir, &version_dir, version, &version_meta).await?;
-        emit("正在检查 Forge/NeoForge 安装器");
-        ensure_mod_loader_installer_outputs(client, app_handle, mc_dir, version, &version_meta, java_path).await?;
-        finish_assets_index(prepared_assets).await?;
+        ensure_mod_loader_install_step(client, app_handle, mc_dir, version, &version_meta, java_path)
+            .await?;
+
+        finish_assets_index(
+            index_path,
+            tmp_index_path,
+            backup_index_path,
+        )
+        .await?;
     } else {
-        ensure_libraries(client, app_handle, mc_dir, &version_dir, version, &version_meta).await?;
-        emit("正在检查 Forge/NeoForge 安装器");
-        ensure_mod_loader_installer_outputs(client, app_handle, mc_dir, version, &version_meta, java_path).await?;
+        ensure_mod_loader_install_step(client, app_handle, mc_dir, version, &version_meta, java_path)
+            .await?;
     }
 
+    emit_progress(app_handle, "资源安装完成");
     Ok(())
+}
+
+async fn ensure_client_jar(
+    client: &Client,
+    app_handle: &tauri::AppHandle,
+    version_dir: &Path,
+    version: &str,
+    version_meta: &MinecraftVersionMeta,
+) -> Result<(), String> {
+    let Some(client_download) = version_meta
+        .downloads
+        .as_ref()
+        .and_then(|d| d.client.as_ref())
+    else {
+        return Ok(());
+    };
+
+    emit_progress(app_handle, "正在检查 Minecraft client jar");
+    let client_jar_path = version_dir.join(format!("{}.jar", version));
+    let url = client_download
+        .url
+        .as_ref()
+        .ok_or_else(|| format!("版本 JSON 缺少 downloads.client.url: {}", version))?;
+    ensure_download_from_urls(
+        client,
+        &[url.clone()],
+        &client_jar_path,
+        client_download.sha1.as_deref(),
+    )
+    .await
+}
+
+async fn ensure_mod_loader_install_step(
+    client: &Client,
+    app_handle: &tauri::AppHandle,
+    mc_dir: &Path,
+    version: &str,
+    version_meta: &MinecraftVersionMeta,
+    java_path: &str,
+) -> Result<(), String> {
+    emit_progress(app_handle, "正在检查 Forge/NeoForge 安装器");
+    ensure_mod_loader_installer_outputs(client, app_handle, mc_dir, version, version_meta, java_path)
+        .await
 }
 
 async fn ensure_download_from_urls(
     client: &Client,
     urls: &[String],
-    dest: &PathBuf,
+    dest: &Path,
     expected_hash: Option<&str>,
 ) -> Result<(), String> {
     if dest.exists() {
@@ -450,34 +569,30 @@ async fn run_download_jobs(
     app_handle: &tauri::AppHandle,
     jobs: Vec<DownloadJob>,
     label: &str,
-) -> Result<(), String> {
-    let _ = app_handle.emit(
-        "download-progress",
-        ProgressPayload {
-            current: 0,
-            total: 0,
-            file: format!("正在检查{}", label),
-        },
-    );
+) -> Result<bool, String> {
+    println!("[updater] checking {} jobs: {}", label, jobs.len());
+    emit_progress(app_handle, format!("正在检查{}", label));
 
     let mut pending_jobs = Vec::new();
     for job in jobs {
         if download_job_needed(&job).await {
+            println!(
+                "[updater] {} pending: {} <- {}",
+                label,
+                job.dest.display(),
+                job.urls.join(" | ")
+            );
             pending_jobs.push(job);
+        } else {
+            println!("[updater] {} exists: {}", label, job.dest.display());
         }
     }
 
     let jobs = pending_jobs;
     if jobs.is_empty() {
-        let _ = app_handle.emit(
-            "download-progress",
-            ProgressPayload {
-                current: 0,
-                total: 0,
-                file: format!("{}已完整", label),
-            },
-        );
-        return Ok(());
+        emit_progress(app_handle, format!("{}已完整", label));
+        println!("[updater] {} complete, no downloads needed", label);
+        return Ok(false);
     }
 
     let total = jobs.len();
@@ -514,7 +629,8 @@ async fn run_download_jobs(
         result?;
     }
 
-    Ok(())
+    println!("[updater] {} downloaded {} files", label, total);
+    Ok(true)
 }
 
 async fn download_job_needed(job: &DownloadJob) -> bool {
@@ -539,6 +655,7 @@ async fn ensure_mod_loader_installer_outputs(
     java_path: &str,
 ) -> Result<(), String> {
     let Some(installer) = detect_mod_loader_installer(version_meta) else {
+        emit_progress(app_handle, "未检测到 Forge/NeoForge 安装器");
         return Ok(());
     };
 
@@ -546,20 +663,16 @@ async fn ensure_mod_loader_installer_outputs(
         ModLoaderKind::Forge => "Forge",
         ModLoaderKind::NeoForge => "NeoForge",
     };
+    emit_progress(
+        app_handle,
+        format!("检测到 {} {}", loader_name, installer.version),
+    );
+
     let launcher_dir = mc_dir
         .parent()
         .ok_or("无法获取 launcher 目录")?
         .join("launcher")
         .join("installers");
-
-    let _ = app_handle.emit(
-        "download-progress",
-        ProgressPayload {
-            current: 0,
-            total: 0,
-            file: format!("正在安装 {} {}", loader_name, installer.version),
-        },
-    );
 
     let installer_path = launcher_dir.join(
         Path::new(&installer.artifact_path)
@@ -575,10 +688,522 @@ async fn ensure_mod_loader_installer_outputs(
         ),
     ];
     ensure_download_from_urls(client, &urls, &installer_path, None).await?;
-    run_mod_loader_installer(java_path, &installer_path, mc_dir, current_version, &installer)?;
+    if matches!(installer.kind, ModLoaderKind::NeoForge) {
+        let profile =
+            ensure_installer_libraries(client, app_handle, mc_dir, &installer_path, &installer)
+                .await?;
+        let client_jar = neoforge_client_jar_path(mc_dir, &installer.version);
+        if !client_jar.exists() {
+            emit_progress(
+                app_handle,
+                format!("正在生成 NeoForge client jar {}", installer.version),
+            );
+            run_neoforge_processors(
+                java_path,
+                mc_dir,
+                current_version,
+                &installer_path,
+                &installer,
+                &profile,
+            )?;
+        }
+        if !client_jar.exists() {
+            return Err(format!("NeoForge client jar 未生成: {}", client_jar.display()));
+        }
+        println!(
+            "[updater] {} {} libraries complete, skip installer",
+            loader_name, installer.version
+        );
+        return Ok(());
+    }
+
+    emit_progress(
+        app_handle,
+        format!("正在安装 {} {}", loader_name, installer.version),
+    );
+    run_mod_loader_installer(
+        java_path,
+        &installer_path,
+        mc_dir,
+        current_version,
+        &installer,
+    )?;
     cleanup_installer_versions(mc_dir, current_version, &installer)?;
 
     Ok(())
+}
+
+fn neoforge_client_jar_path(mc_dir: &Path, version: &str) -> PathBuf {
+    mc_dir
+        .join("libraries")
+        .join("net")
+        .join("neoforged")
+        .join("neoforge")
+        .join(version)
+        .join(format!("neoforge-{}-client.jar", version))
+}
+
+async fn ensure_installer_libraries(
+    client: &Client,
+    app_handle: &tauri::AppHandle,
+    mc_dir: &Path,
+    installer_path: &Path,
+    installer: &ModLoaderInstaller,
+) -> Result<InstallerProfile, String> {
+    let libs_dir = mc_dir.join("libraries");
+    let mut jobs = Vec::new();
+    let mut seen = HashSet::new();
+    let mut profile = None;
+
+    for entry_name in ["version.json", "install_profile.json"] {
+        println!(
+            "[updater] reading NeoForge installer metadata: {} from {}",
+            entry_name,
+            installer_path.display()
+        );
+        let raw_json = read_zip_entry_text(installer_path, entry_name)?;
+        let metadata: InstallerLibraries = serde_json::from_str(&raw_json)
+            .map_err(|e| format!("解析安装器 {} 失败: {}", entry_name, e))?;
+        if entry_name == "install_profile.json" {
+            profile = Some(
+                serde_json::from_str::<InstallerProfile>(&raw_json)
+                    .map_err(|e| format!("解析安装器 install_profile.json 失败: {}", e))?,
+            );
+        }
+        println!(
+            "[updater] NeoForge installer {} libraries: {}",
+            entry_name,
+            metadata.libraries.len()
+        );
+
+        for library in metadata.libraries {
+            add_installer_library_job(&libs_dir, library, &mut jobs, &mut seen);
+        }
+    }
+
+    let client_data_path = copy_installer_lzma_data(installer_path, &libs_dir, installer, "client")?
+        .ok_or_else(|| {
+            format!(
+                "NeoForge installer 缺少必要文件 data/client.lzma: {}",
+                installer_path.display()
+            )
+        })?;
+    if !client_data_path.exists() {
+        return Err(format!(
+            "NeoForge client binpatch 未成功写入: {}",
+            client_data_path.display()
+        ));
+    }
+
+    println!(
+        "[updater] NeoForge installer library jobs collected: {}",
+        jobs.len()
+    );
+    if !jobs.is_empty() {
+        let _ = run_download_jobs(client, app_handle, jobs, "NeoForge libraries").await?;
+    }
+
+    profile.ok_or_else(|| "NeoForge installer 缺少 install_profile.json".to_string())
+}
+
+fn add_installer_library_job(
+    libs_dir: &Path,
+    library: MinecraftLibrary,
+    jobs: &mut Vec<DownloadJob>,
+    seen: &mut HashSet<PathBuf>,
+) {
+    let artifact = library
+        .downloads
+        .as_ref()
+        .and_then(|downloads| downloads.artifact.as_ref());
+
+    let path = if let Some(path) = artifact.and_then(|artifact| artifact.path.clone()) {
+        path
+    } else if library.url.as_deref().is_some_and(|url| !url.trim().is_empty()) {
+        let Some(path) = library.name.as_deref().and_then(library_path_from_name) else {
+            return;
+        };
+        path
+    } else {
+        if let Some(name) = library.name.as_deref() {
+            println!(
+                "[updater] NeoForge installer library skipped generated/local artifact: {}",
+                name
+            );
+        }
+        return;
+    };
+
+    let dest = libs_dir.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
+    if !seen.insert(dest.clone()) {
+        if let Some(name) = library.name.as_deref() {
+            println!("[updater] NeoForge installer library duplicate: {}", name);
+        }
+        return;
+    }
+
+    let mut urls = vec![format!(
+        "{}/maven/{}",
+        BMCLAPI_BASE_URL,
+        path.replace('\\', "/")
+    )];
+
+    if let Some(url) = artifact.and_then(|artifact| artifact.url.as_ref()) {
+        append_url(&mut urls, url);
+    }
+    if let Some(base_url) = &library.url {
+        append_base_url(&mut urls, base_url, &path);
+    }
+
+    println!(
+        "[updater] NeoForge installer library job: {} -> {}",
+        library.name.as_deref().unwrap_or(&path),
+        dest.display()
+    );
+
+    jobs.push(DownloadJob {
+        urls,
+        dest,
+        sha1: artifact.and_then(|artifact| artifact.sha1.clone()),
+    });
+}
+
+fn copy_installer_lzma_data(
+    installer_path: &Path,
+    libs_dir: &Path,
+    installer: &ModLoaderInstaller,
+    side: &str,
+) -> Result<Option<PathBuf>, String> {
+    let entry_name = format!("data/{}.lzma", side);
+    let Some(bytes) = read_zip_entry_bytes(installer_path, &entry_name)? else {
+        return Ok(None);
+    };
+
+    let data_path = installer_data_lzma_path(libs_dir, installer, side);
+    if let Some(parent) = data_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("创建 LZMA 目录失败 {}: {}", parent.display(), e))?;
+    }
+    std::fs::write(&data_path, bytes)
+        .map_err(|e| format!("写入 installer LZMA 失败 {}: {}", data_path.display(), e))?;
+    println!(
+        "[updater] copied installer binpatch {} -> {}",
+        entry_name,
+        data_path.display()
+    );
+    Ok(Some(data_path))
+}
+
+fn installer_data_lzma_path(libs_dir: &Path, installer: &ModLoaderInstaller, side: &str) -> PathBuf {
+    let (group_path, artifact) = match installer.kind {
+        ModLoaderKind::Forge => ("net/minecraftforge", "forge"),
+        ModLoaderKind::NeoForge => ("net/neoforged", "neoforge"),
+    };
+    let classifier = format!("{}data", side);
+    libs_dir
+        .join(group_path.replace('/', std::path::MAIN_SEPARATOR_STR))
+        .join(artifact)
+        .join(&installer.version)
+        .join(format!(
+            "{}-{}-{}.lzma",
+            artifact, installer.version, classifier
+        ))
+}
+
+fn run_neoforge_processors(
+    java_path: &str,
+    mc_dir: &Path,
+    current_version: &str,
+    installer_path: &Path,
+    installer: &ModLoaderInstaller,
+    profile: &InstallerProfile,
+) -> Result<(), String> {
+    let libs_dir = mc_dir.join("libraries");
+    let version_jar = mc_dir
+        .join("versions")
+        .join(current_version)
+        .join(format!("{}.jar", current_version));
+    let cp_sep = if cfg!(windows) { ";" } else { ":" };
+
+    for processor in &profile.processors {
+        if processor
+            .sides
+            .as_ref()
+            .is_some_and(|sides| !sides.iter().any(|side| side == "client"))
+        {
+            continue;
+        }
+
+        let processor_jar = artifact_path_from_name(&libs_dir, &processor.jar)?;
+        if !processor_jar.exists() {
+            return Err(format!(
+                "NeoForge processor jar 缺失: {} ({})",
+                processor_jar.display(),
+                processor.jar
+            ));
+        }
+
+        let mut classpath = vec![processor_jar.clone()];
+        let mut seen = HashSet::new();
+        seen.insert(processor_jar.clone());
+        for artifact in &processor.classpath {
+            let path = artifact_path_from_name(&libs_dir, artifact)?;
+            if seen.insert(path.clone()) {
+                classpath.push(path);
+            }
+        }
+
+        for path in &classpath {
+            if !path.exists() {
+                return Err(format!("NeoForge processor classpath 缺失: {}", path.display()));
+            }
+        }
+
+        let main_class = read_jar_main_class(&processor_jar)?;
+        let args = processor
+            .args
+            .iter()
+            .map(|arg| {
+                resolve_processor_arg(
+                    arg,
+                    mc_dir,
+                    &libs_dir,
+                    installer_path,
+                    installer,
+                    profile,
+                    &version_jar,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        println!(
+            "[updater] running NeoForge processor {} {}",
+            processor.jar,
+            args.join(" ")
+        );
+        let cp = classpath
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join(cp_sep);
+
+        let mut cmd = Command::new(java_path);
+        cmd.arg("-cp").arg(cp).arg(main_class).args(&args);
+        cmd.current_dir(mc_dir);
+        #[cfg(windows)]
+        {
+            cmd.creation_flags(0x08000000);
+        }
+
+        let output = cmd
+            .output()
+            .map_err(|e| format!("无法执行 NeoForge processor {}: {}", processor.jar, e))?;
+        if !output.status.success() {
+            return Err(format!(
+                "NeoForge processor 执行失败: {} | stdout: {} | stderr: {}",
+                processor.jar,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_processor_arg(
+    arg: &str,
+    mc_dir: &Path,
+    libs_dir: &Path,
+    installer_path: &Path,
+    installer: &ModLoaderInstaller,
+    profile: &InstallerProfile,
+    version_jar: &Path,
+) -> Result<String, String> {
+    let root = mc_dir.to_string_lossy().to_string();
+    let installer_file = installer_path.to_string_lossy().to_string();
+    let minecraft_jar = version_jar.to_string_lossy().to_string();
+    let mut resolved = arg
+        .replace("{ROOT}", &root)
+        .replace("{INSTALLER}", &installer_file)
+        .replace("{MINECRAFT_JAR}", &minecraft_jar)
+        .replace("{SIDE}", "client");
+
+    for key in profile.data.keys() {
+        let token = format!("{{{}}}", key);
+        if resolved.contains(&token) {
+            let value = profile
+                .data
+                .get(key)
+                .and_then(|side_values| side_values.get("client"))
+                .ok_or_else(|| format!("NeoForge install_profile 缺少 client data: {}", key))?;
+            let value = resolve_install_profile_value(value, libs_dir, installer)?;
+            resolved = resolved.replace(&token, &value);
+        }
+    }
+
+    if resolved.starts_with('[') && resolved.ends_with(']') {
+        resolved = resolve_install_profile_value(&resolved, libs_dir, installer)?;
+    }
+
+    Ok(resolved)
+}
+
+fn resolve_install_profile_value(
+    value: &str,
+    libs_dir: &Path,
+    installer: &ModLoaderInstaller,
+) -> Result<String, String> {
+    if let Some(artifact) = value.strip_prefix('[').and_then(|v| v.strip_suffix(']')) {
+        return Ok(artifact_path_from_name(libs_dir, artifact)?
+            .to_string_lossy()
+            .to_string());
+    }
+
+    if value == "/data/client.lzma" {
+        return Ok(installer_data_lzma_path(libs_dir, installer, "client")
+            .to_string_lossy()
+            .to_string());
+    }
+    if value == "/data/server.lzma" {
+        return Ok(installer_data_lzma_path(libs_dir, installer, "server")
+            .to_string_lossy()
+            .to_string());
+    }
+
+    if let Some(quoted) = value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')) {
+        return Ok(quoted.to_string());
+    }
+
+    Ok(value.to_string())
+}
+
+fn artifact_path_from_name(libs_dir: &Path, name: &str) -> Result<PathBuf, String> {
+    let path = library_path_from_name(name)
+        .ok_or_else(|| format!("无法解析 Maven 坐标: {}", name))?;
+    Ok(libs_dir.join(path.replace('/', std::path::MAIN_SEPARATOR_STR)))
+}
+
+fn read_jar_main_class(jar_path: &Path) -> Result<String, String> {
+    let manifest = read_zip_entry_text(jar_path, "META-INF/MANIFEST.MF")?;
+    let mut current_key = String::new();
+    let mut current_value = String::new();
+    for line in manifest.lines() {
+        if let Some(rest) = line.strip_prefix(' ') {
+            current_value.push_str(rest);
+            continue;
+        }
+
+        if current_key.eq_ignore_ascii_case("Main-Class") {
+            return Ok(current_value.trim().to_string());
+        }
+
+        if let Some((key, value)) = line.split_once(':') {
+            current_key = key.trim().to_string();
+            current_value = value.trim().to_string();
+        }
+    }
+
+    if current_key.eq_ignore_ascii_case("Main-Class") {
+        return Ok(current_value.trim().to_string());
+    }
+
+    Err(format!("processor jar 缺少 Main-Class: {}", jar_path.display()))
+}
+
+fn read_zip_entry_text(zip_path: &Path, entry_name: &str) -> Result<String, String> {
+    let bytes = read_zip_entry_bytes(zip_path, entry_name)?
+        .ok_or_else(|| format!("安装器缺少 {}", entry_name))?;
+    String::from_utf8(bytes).map_err(|e| format!("安装器 {} 不是 UTF-8 文本: {}", entry_name, e))
+}
+
+fn read_zip_entry_bytes(zip_path: &Path, entry_name: &str) -> Result<Option<Vec<u8>>, String> {
+    let data = std::fs::read(zip_path)
+        .map_err(|e| format!("读取安装器失败 {}: {}", zip_path.display(), e))?;
+    let eocd = find_end_of_central_directory(&data).ok_or("安装器 ZIP 结构无效: 缺少 EOCD")?;
+    let entry_count = read_u16(&data, eocd + 10)? as usize;
+    let mut central_dir_offset = read_u32(&data, eocd + 16)? as usize;
+
+    for _ in 0..entry_count {
+        if read_u32(&data, central_dir_offset)? != 0x0201_4b50 {
+            return Err("安装器 ZIP 结构无效: central directory 损坏".to_string());
+        }
+
+        let compression_method = read_u16(&data, central_dir_offset + 10)?;
+        let compressed_size = read_u32(&data, central_dir_offset + 20)? as usize;
+        let name_len = read_u16(&data, central_dir_offset + 28)? as usize;
+        let extra_len = read_u16(&data, central_dir_offset + 30)? as usize;
+        let comment_len = read_u16(&data, central_dir_offset + 32)? as usize;
+        let local_header_offset = read_u32(&data, central_dir_offset + 42)? as usize;
+        let name_start = central_dir_offset + 46;
+        let name_end = name_start + name_len;
+        let name = std::str::from_utf8(
+            data.get(name_start..name_end)
+                .ok_or("安装器 ZIP 结构无效: 文件名越界")?,
+        )
+        .map_err(|e| format!("安装器 ZIP 文件名不是 UTF-8: {}", e))?;
+
+        if name == entry_name {
+            if read_u32(&data, local_header_offset)? != 0x0403_4b50 {
+                return Err("安装器 ZIP 结构无效: local header 损坏".to_string());
+            }
+
+            let local_name_len = read_u16(&data, local_header_offset + 26)? as usize;
+            let local_extra_len = read_u16(&data, local_header_offset + 28)? as usize;
+            let payload_start = local_header_offset + 30 + local_name_len + local_extra_len;
+            let payload_end = payload_start + compressed_size;
+            let payload = data
+                .get(payload_start..payload_end)
+                .ok_or("安装器 ZIP 结构无效: 文件内容越界")?;
+
+            let bytes = match compression_method {
+                0 => payload.to_vec(),
+                8 => {
+                    let mut decoder = DeflateDecoder::new(payload);
+                    let mut output = Vec::new();
+                    decoder
+                        .read_to_end(&mut output)
+                        .map_err(|e| format!("解压安装器 {} 失败: {}", entry_name, e))?;
+                    output
+                }
+                other => {
+                    return Err(format!(
+                        "安装器 {} 使用不支持的 ZIP 压缩方法: {}",
+                        entry_name, other
+                    ));
+                }
+            };
+
+            return Ok(Some(bytes));
+        }
+
+        central_dir_offset += 46 + name_len + extra_len + comment_len;
+    }
+
+    Ok(None)
+}
+
+fn find_end_of_central_directory(data: &[u8]) -> Option<usize> {
+    data.windows(4)
+        .enumerate()
+        .rev()
+        .find_map(|(index, window)| {
+            (window == [0x50, 0x4b, 0x05, 0x06].as_slice()).then_some(index)
+        })
+}
+
+fn read_u16(data: &[u8], offset: usize) -> Result<u16, String> {
+    let bytes = data
+        .get(offset..offset + 2)
+        .ok_or("安装器 ZIP 结构无效: u16 越界")?;
+    Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
+}
+
+fn read_u32(data: &[u8], offset: usize) -> Result<u32, String> {
+    let bytes = data
+        .get(offset..offset + 4)
+        .ok_or("安装器 ZIP 结构无效: u32 越界")?;
+    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
 fn detect_mod_loader_installer(version_meta: &MinecraftVersionMeta) -> Option<ModLoaderInstaller> {
@@ -631,7 +1256,9 @@ fn detect_mod_loader_installer(version_meta: &MinecraftVersionMeta) -> Option<Mo
     detect_mod_loader_from_fml_args(version_meta)
 }
 
-fn detect_mod_loader_from_fml_args(version_meta: &MinecraftVersionMeta) -> Option<ModLoaderInstaller> {
+fn detect_mod_loader_from_fml_args(
+    version_meta: &MinecraftVersionMeta,
+) -> Option<ModLoaderInstaller> {
     let mut args = Vec::new();
     collect_json_strings(version_meta.arguments.as_ref()?, &mut args);
 
@@ -643,6 +1270,19 @@ fn detect_mod_loader_from_fml_args(version_meta: &MinecraftVersionMeta) -> Optio
     let mc_version = get_arg_value("--fml.mcVersion");
     let forge_version = get_arg_value("--fml.forgeVersion");
     let forge_group = get_arg_value("--fml.forgeGroup");
+    let neo_forge_version = get_arg_value("--fml.neoForgeVersion");
+
+    if let Some(version) = neo_forge_version {
+        return Some(ModLoaderInstaller {
+            kind: ModLoaderKind::NeoForge,
+            artifact_path: format!(
+                "net/neoforged/neoforge/{0}/neoforge-{0}-installer.jar",
+                version
+            ),
+            official_base_url: "https://maven.neoforged.net/releases",
+            version,
+        });
+    }
 
     if forge_group.as_deref() == Some("net.minecraftforge") {
         if let (Some(mc_version), Some(forge_version)) = (mc_version, forge_version) {
@@ -689,28 +1329,21 @@ fn run_mod_loader_installer(
     ensure_launcher_profiles(mc_dir, current_version, installer)?;
 
     let attempts: Vec<(&str, bool)> = match installer.kind {
-        ModLoaderKind::Forge => vec![
-            ("--installClient", true),
-            ("--installClient", false),
-        ],
-        ModLoaderKind::NeoForge => vec![
-            ("--installClient", true),
-            ("--installClient", false),
-            ("--install-client", true),
-            ("--install-client", false),
-        ],
+        ModLoaderKind::Forge => vec![("--installClient", true), ("--installClient", false)],
+        ModLoaderKind::NeoForge => vec![("--install-client", true), ("--installClient", true)],
     };
     let mut outputs = Vec::new();
 
     for (install_arg, include_dir) in attempts {
         let mut cmd = Command::new(java_path);
-        cmd.arg("-jar")
-            .arg(installer_path)
-            .arg(install_arg);
+        cmd.arg("-jar").arg(installer_path).arg(install_arg);
         if include_dir {
             cmd.arg(mc_dir);
         }
         cmd.current_dir(mc_dir);
+        if let Some(parent) = mc_dir.parent() {
+            cmd.env("APPDATA", parent);
+        }
 
         #[cfg(windows)]
         {
@@ -718,8 +1351,11 @@ fn run_mod_loader_installer(
         }
 
         match cmd.output() {
-            Ok(output) if output.status.success() => return Ok(()),
             Ok(output) => {
+                if output.status.success() {
+                    return Ok(());
+                }
+
                 outputs.push(format!(
                     "参数: {}{} | stdout: {} | stderr: {}",
                     install_arg,
@@ -733,7 +1369,11 @@ fn run_mod_loader_installer(
         }
     }
 
-    Err(format!("安装器执行失败: {} ({})", installer_path.display(), outputs.join(" || ")))
+    Err(format!(
+        "安装器执行失败: {} ({})",
+        installer_path.display(),
+        outputs.join(" || ")
+    ))
 }
 
 fn cleanup_installer_versions(
@@ -794,7 +1434,10 @@ fn ensure_launcher_profiles(
         .as_object_mut()
         .ok_or("launcher_profiles.json 根节点不是对象")?;
     root.insert("version".to_string(), serde_json::json!(3));
-    root.insert("selectedProfile".to_string(), serde_json::json!(profile_id.clone()));
+    root.insert(
+        "selectedProfile".to_string(),
+        serde_json::json!(profile_id.clone()),
+    );
     root.entry("clientToken".to_string())
         .or_insert_with(|| serde_json::json!("circube-launcher"));
     root.entry("authenticationDatabase".to_string())
@@ -814,15 +1457,33 @@ fn ensure_launcher_profiles(
         root.insert("settings".to_string(), serde_json::json!({}));
     }
     if let Some(settings) = root.get_mut("settings").and_then(Value::as_object_mut) {
-        settings.entry("enableAdvanced".to_string()).or_insert(serde_json::json!(true));
-        settings.entry("enableAnalytics".to_string()).or_insert(serde_json::json!(false));
-        settings.entry("enableHistorical".to_string()).or_insert(serde_json::json!(false));
-        settings.entry("enableReleases".to_string()).or_insert(serde_json::json!(true));
-        settings.entry("enableSnapshots".to_string()).or_insert(serde_json::json!(false));
-        settings.entry("keepLauncherOpen".to_string()).or_insert(serde_json::json!(false));
-        settings.entry("profileSorting".to_string()).or_insert(serde_json::json!("ByLastPlayed"));
-        settings.entry("showGameLog".to_string()).or_insert(serde_json::json!(false));
-        settings.entry("showMenu".to_string()).or_insert(serde_json::json!(false));
+        settings
+            .entry("enableAdvanced".to_string())
+            .or_insert(serde_json::json!(true));
+        settings
+            .entry("enableAnalytics".to_string())
+            .or_insert(serde_json::json!(false));
+        settings
+            .entry("enableHistorical".to_string())
+            .or_insert(serde_json::json!(false));
+        settings
+            .entry("enableReleases".to_string())
+            .or_insert(serde_json::json!(true));
+        settings
+            .entry("enableSnapshots".to_string())
+            .or_insert(serde_json::json!(false));
+        settings
+            .entry("keepLauncherOpen".to_string())
+            .or_insert(serde_json::json!(false));
+        settings
+            .entry("profileSorting".to_string())
+            .or_insert(serde_json::json!("ByLastPlayed"));
+        settings
+            .entry("showGameLog".to_string())
+            .or_insert(serde_json::json!(false));
+        settings
+            .entry("showMenu".to_string())
+            .or_insert(serde_json::json!(false));
     }
 
     if !root.get("profiles").is_some_and(Value::is_object) {
@@ -878,10 +1539,11 @@ async fn ensure_libraries(
     version_dir: &Path,
     version: &str,
     version_meta: &MinecraftVersionMeta,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let libs_dir = mc_dir.join("libraries");
     let natives_dir = version_dir.join(format!("{}-natives", version));
     let mut jobs = Vec::new();
+    let mut seen_jobs = HashSet::new();
     let mut native_extracts = Vec::new();
 
     for library in &version_meta.libraries {
@@ -898,19 +1560,27 @@ async fn ensure_libraries(
             .and_then(|artifact| artifact.path.clone())
             .or_else(|| library.name.as_deref().and_then(library_path_from_name))
         {
-            let mut urls = vec![format!("{}/maven/{}", BMCLAPI_BASE_URL, path.replace('\\', "/"))];
+            let mut urls = vec![format!(
+                "{}/maven/{}",
+                BMCLAPI_BASE_URL,
+                path.replace('\\', "/")
+            )];
             if let Some(url) = artifact.and_then(|artifact| artifact.url.as_ref()) {
-                urls.push(url.clone());
+                append_url(&mut urls, url);
             }
             if let Some(base_url) = &library.url {
                 append_base_url(&mut urls, base_url, &path);
             }
             let dest = libs_dir.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
-            jobs.push(DownloadJob {
-                urls,
-                dest,
-                sha1: artifact.and_then(|artifact| artifact.sha1.clone()),
-            });
+            push_download_job(
+                &mut jobs,
+                &mut seen_jobs,
+                DownloadJob {
+                    urls,
+                    dest,
+                    sha1: artifact.and_then(|artifact| artifact.sha1.clone()),
+                },
+            );
         }
 
         let Some(native_key) = native_classifier_key(library.natives.as_ref()) else {
@@ -927,35 +1597,57 @@ async fn ensure_libraries(
         };
 
         if let Some(path) = &native_artifact.path {
-            let mut urls = vec![format!("{}/maven/{}", BMCLAPI_BASE_URL, path.replace('\\', "/"))];
+            let mut urls = vec![format!(
+                "{}/maven/{}",
+                BMCLAPI_BASE_URL,
+                path.replace('\\', "/")
+            )];
             if let Some(url) = &native_artifact.url {
-                urls.push(url.clone());
+                append_url(&mut urls, url);
             }
             if let Some(base_url) = &library.url {
                 append_base_url(&mut urls, base_url, path);
             }
             let dest = libs_dir.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
-            jobs.push(DownloadJob {
-                urls,
-                dest: dest.clone(),
-                sha1: native_artifact.sha1.clone(),
-            });
+            push_download_job(
+                &mut jobs,
+                &mut seen_jobs,
+                DownloadJob {
+                    urls,
+                    dest: dest.clone(),
+                    sha1: native_artifact.sha1.clone(),
+                },
+            );
             native_extracts.push(dest);
         }
     }
 
-    run_download_jobs(client, app_handle, jobs, "Minecraft libraries").await?;
+    println!("[updater] Minecraft libraries collected: {}", jobs.len());
+    let downloaded = run_download_jobs(client, app_handle, jobs, "Minecraft libraries").await?;
 
     for jar_path in native_extracts {
         extract_native_jar(&jar_path, &natives_dir)?;
     }
 
-    Ok(())
+    Ok(downloaded)
 }
 
-async fn asset_index_matches(mc_dir: &Path, version_meta: &MinecraftVersionMeta) -> Result<bool, String> {
+fn push_download_job(
+    jobs: &mut Vec<DownloadJob>,
+    seen_jobs: &mut HashSet<PathBuf>,
+    job: DownloadJob,
+) {
+    if seen_jobs.insert(job.dest.clone()) {
+        jobs.push(job);
+    }
+}
+
+async fn asset_index_exists(
+    mc_dir: &Path,
+    version_meta: &MinecraftVersionMeta,
+) -> Result<bool, String> {
     let Some(asset_index) = &version_meta.asset_index else {
-        return Ok(true);
+        return Ok(false);
     };
 
     let index_path = mc_dir
@@ -966,13 +1658,7 @@ async fn asset_index_matches(mc_dir: &Path, version_meta: &MinecraftVersionMeta)
         return Ok(false);
     }
 
-    match asset_index.sha1.as_deref() {
-        Some(expected_hash) => calculate_sha1(&index_path)
-            .await
-            .map(|actual_hash| actual_hash == expected_hash)
-            .map_err(|e| e.to_string()),
-        None => Ok(true),
-    }
+    Ok(true)
 }
 
 async fn prepare_assets(
@@ -1044,15 +1730,22 @@ async fn prepare_assets(
     }))
 }
 
-async fn finish_assets_index(prepared_assets: PreparedAssets) -> Result<(), String> {
-    if prepared_assets.index_path.exists() {
-        let _ = fs::remove_file(&prepared_assets.index_path).await;
-    }
-    fs::rename(&prepared_assets.tmp_index_path, &prepared_assets.index_path)
-        .await
-        .map_err(|e| format!("保存 assets index 失败: {}", e))?;
-    if let Some(backup_index_path) = prepared_assets.backup_index_path {
+async fn finish_assets_index(
+    index_path: PathBuf,
+    tmp_index_path: PathBuf,
+    backup_index_path: Option<PathBuf>,
+) -> Result<(), String> {
+    if let Some(backup_index_path) = backup_index_path {
+        if let Err(e) = fs::rename(&tmp_index_path, &index_path).await {
+            let _ = fs::rename(&backup_index_path, &index_path).await;
+            return Err(format!("保存 assets index 失败: {}", e));
+        }
+
         let _ = fs::remove_file(backup_index_path).await;
+    } else {
+        fs::rename(&tmp_index_path, &index_path)
+            .await
+            .map_err(|e| format!("保存 assets index 失败: {}", e))?;
     }
 
     Ok(())
@@ -1122,8 +1815,22 @@ fn library_path_from_name(name: &str) -> Option<String> {
     Some(format!("{}/{}/{}/{}", group, artifact, version, file_name))
 }
 
+fn append_url(urls: &mut Vec<String>, url: &str) {
+    if !url.trim().is_empty() {
+        urls.push(url.to_string());
+    }
+}
+
 fn append_base_url(urls: &mut Vec<String>, base_url: &str, path: &str) {
-    urls.push(format!("{}/{}", base_url.trim_end_matches('/'), path.replace('\\', "/")));
+    if base_url.trim().is_empty() {
+        return;
+    }
+
+    urls.push(format!(
+        "{}/{}",
+        base_url.trim_end_matches('/'),
+        path.replace('\\', "/")
+    ));
 }
 
 fn extract_native_jar(jar_path: &Path, natives_dir: &Path) -> Result<(), String> {
@@ -1172,7 +1879,7 @@ fn extract_native_jar(jar_path: &Path, natives_dir: &Path) -> Result<(), String>
 async fn download_file_streamed(
     client: &Client,
     url: &str,
-    dest: &PathBuf,
+    dest: &Path,
     expected_hash: Option<&str>,
 ) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
@@ -1230,7 +1937,7 @@ async fn cleanup_unused_mods(base_dir: &Path, version: &str, remote: &Manifest) 
         .files
         .keys()
         .filter(|k| k.contains("/mods/"))
-        .map(|k| k.replace('\\', "/"))
+        .map(|k| manifest_file_path(k))
         .collect();
 
     let mods_dir = base_dir.join("versions").join(version).join("mods");

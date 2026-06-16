@@ -3,7 +3,7 @@ use crate::models::*;
 use crate::utils::validate_java;
 use reqwest::Client;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::process::Command;
 use std::sync::Mutex;
@@ -218,6 +218,17 @@ fn library_path_from_name(name: &str) -> Option<String> {
     Some(format!("{}/{}/{}/{}", group, artifact, version, file_name))
 }
 
+fn push_unique_classpath(
+    cp_list: &mut Vec<String>,
+    cp_seen: &mut HashSet<String>,
+    path: &std::path::Path,
+) {
+    let path_str = path.to_string_lossy().to_string();
+    if cp_seen.insert(path_str.clone()) {
+        cp_list.push(path_str);
+    }
+}
+
 #[tauri::command]
 pub async fn launch_minecraft(
     client: tauri::State<'_, Client>,
@@ -297,6 +308,7 @@ pub async fn launch_minecraft(
     let cp_sep = if cfg!(windows) { ";" } else { ":" };
 
     let mut cp_list: Vec<String> = Vec::new();
+    let mut cp_seen: HashSet<String> = HashSet::new();
     let current_os_name = if cfg!(target_os = "windows") {
         "windows"
     } else if cfg!(target_os = "macos") {
@@ -340,14 +352,14 @@ pub async fn launch_minecraft(
             let lib_path = libs_base.join(path_str);
 
             if lib_path.exists() {
-                cp_list.push(lib_path.to_string_lossy().to_string());
+                push_unique_classpath(&mut cp_list, &mut cp_seen, &lib_path);
             }
         }
     }
 
     let version_jar_path = mc_dir.join(format!("versions/{0}/{0}.jar", version_name));
     if version_jar_path.exists() {
-        cp_list.push(version_jar_path.to_string_lossy().to_string());
+        push_unique_classpath(&mut cp_list, &mut cp_seen, &version_jar_path);
     } else {
         emit_progress(&format!("警告: 未找到核心文件 {:?}", version_jar_path));
     }

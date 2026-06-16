@@ -86,9 +86,14 @@ pub struct UserInfo {
     pub name: String,
     pub uuid: String,
     pub access_token: String,
+    #[serde(default)]
     pub refresh_token: String,
+    #[serde(default)]
+    pub client_token: String,
     pub skin_url: String,
     pub auth_type: String,
+    #[serde(default)]
+    pub expires_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

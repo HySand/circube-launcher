@@ -1,16 +1,15 @@
 use crate::models::*;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use reqwest::Client;
 use serde_json::Value;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Mutex,
 };
-use tauri::Emitter;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tauri::{Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
-use tauri::Manager;
-use reqwest::Client;
-
 
 pub const CLIENT_ID: &str = match option_env!("MS_CLIENT_ID") {
     Some(id) => id,
@@ -18,7 +17,15 @@ pub const CLIENT_ID: &str = match option_env!("MS_CLIENT_ID") {
 };
 const MS_SCOPE: &str = "XboxLive.signin offline_access";
 const DEVICE_CODE_EXPIRES_IN_FALLBACK: u64 = 900;
+const MC_TOKEN_EXPIRES_IN_FALLBACK: u64 = 24 * 60 * 60;
+const TOKEN_REFRESH_SKEW_SECS: i64 = 10 * 60;
 static MS_LOGIN_SESSION: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug)]
+enum TokenRefreshError {
+    Expired(String),
+    Temporary(String),
+}
 
 fn microsoft_client_id() -> Result<&'static str, String> {
     let client_id = CLIENT_ID.trim();
@@ -26,6 +33,45 @@ fn microsoft_client_id() -> Result<&'static str, String> {
         return Err("未配置 Microsoft OAuth 客户端 ID。请在构建时设置 MS_CLIENT_ID。".into());
     }
     Ok(client_id)
+}
+
+fn unix_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default()
+}
+
+fn token_expires_at(expires_in: Option<u64>, fallback_secs: u64) -> Option<i64> {
+    let secs = expires_in.unwrap_or(fallback_secs);
+    if secs > i64::MAX as u64 {
+        return None;
+    }
+
+    unix_timestamp().checked_add(secs as i64)
+}
+
+fn is_token_fresh(expires_at: Option<i64>) -> bool {
+    expires_at.is_some_and(|expires_at| {
+        expires_at > unix_timestamp().saturating_add(TOKEN_REFRESH_SKEW_SECS)
+    })
+}
+
+fn is_microsoft_refresh_expired(body: &Value) -> bool {
+    body.get("error")
+        .and_then(Value::as_str)
+        .is_some_and(|error| error.eq_ignore_ascii_case("invalid_grant"))
+}
+
+fn yggdrasil_token_body(access_token: &str, client_token: &str, request_user: bool) -> Value {
+    let mut body = serde_json::json!({ "accessToken": access_token });
+    if !client_token.is_empty() {
+        body["clientToken"] = serde_json::json!(client_token);
+    }
+    if request_user {
+        body["requestUser"] = serde_json::json!(true);
+    }
+    body
 }
 
 async fn response_json(res: reqwest::Response, context: &str) -> Result<Value, String> {
@@ -79,7 +125,10 @@ fn service_error_message(body: &Value) -> String {
 fn format_service_error(context: &str, status: u16, body: &Value) -> String {
     let detail = service_error_message(body);
 
-    if detail.to_ascii_lowercase().contains("invalid app registration") {
+    if detail
+        .to_ascii_lowercase()
+        .contains("invalid app registration")
+    {
         return format!(
             "{}失败 (HTTP {}): Microsoft 应用注册无效或没有 Minecraft Services 登录权限。请确认 MS_CLIENT_ID 对应的应用仍可使用 Xbox Live/Minecraft 登录。原始信息: {}",
             context, status, detail
@@ -94,7 +143,10 @@ fn format_service_error(context: &str, status: u16, body: &Value) -> String {
             2148916238 => "该账号是儿童账号，无法直接使用此登录方式。",
             _ => "Xbox Live 返回了未知限制。",
         };
-        return format!("{}失败 (HTTP {}, XErr {}): {}", context, status, xerr, reason);
+        return format!(
+            "{}失败 (HTTP {}, XErr {}): {}",
+            context, status, xerr, reason
+        );
     }
 
     format!("{}失败 (HTTP {}): {}", context, status, detail)
@@ -144,7 +196,11 @@ async fn check_minecraft_entitlements(
     auth_debug_json("Entitlements", &data);
 
     if !status.is_success() {
-        return Err(format_service_error("Minecraft 拥有权验证", status.as_u16(), &data));
+        return Err(format_service_error(
+            "Minecraft 拥有权验证",
+            status.as_u16(),
+            &data,
+        ));
     }
 
     let has_items = data
@@ -168,8 +224,14 @@ pub async fn process_user_info(
     let profile_id = profile_data["id"].as_str().ok_or("Invalid profile id")?;
     let profile_name = profile_data["name"].as_str().unwrap_or("Player");
 
-    let texture_url = format!("https://littleskin.cn/api/yggdrasil/sessionserver/session/minecraft/profile/{}", profile_id);
-    let texture_res = client.get(&texture_url).send().await
+    let texture_url = format!(
+        "https://littleskin.cn/api/yggdrasil/sessionserver/session/minecraft/profile/{}",
+        profile_id
+    );
+    let texture_res = client
+        .get(&texture_url)
+        .send()
+        .await
         .map_err(|e| e.to_string())?;
 
     let texture_data: Value = texture_res.json().await.map_err(|e| e.to_string())?;
@@ -193,8 +255,10 @@ pub async fn process_user_info(
         uuid: profile_id.to_string(),
         access_token: access_token.as_str().unwrap_or("").to_string(),
         refresh_token: "".into(),
+        client_token: "".into(),
         skin_url,
         auth_type: "Yggdrasil".into(),
+        expires_at: None,
     })
 }
 
@@ -224,8 +288,9 @@ pub async fn ms_login(
         .map_err(|e| e.to_string())?;
     auth_debug("DeviceCode", format!("devicecode HTTP {}", res.status()));
 
-    let data: DeviceCodeResponse = serde_json::from_value(response_json(res, "获取微软设备码").await?)
-        .map_err(|e| format!("获取微软设备码响应解析失败: {}", e))?;
+    let data: DeviceCodeResponse =
+        serde_json::from_value(response_json(res, "获取微软设备码").await?)
+            .map_err(|e| format!("获取微软设备码响应解析失败: {}", e))?;
     let user_code = data.user_code.clone();
     let device_code = data.device_code.clone();
     let interval = data.interval;
@@ -236,7 +301,9 @@ pub async fn ms_login(
         .verification_uri_complete
         .as_deref()
         .unwrap_or(&data.verification_uri);
-    app.opener().open_url(verification_uri, None::<String>).map_err(|e| e.to_string())?;
+    app.opener()
+        .open_url(verification_uri, None::<String>)
+        .map_err(|e| e.to_string())?;
     emit_status(
         &app,
         "DeviceCode",
@@ -276,7 +343,10 @@ pub async fn ms_login(
             emit_status(
                 &handle,
                 "Poll",
-                format!("正在轮询 Microsoft Token，第 {} 次，session={}", poll_attempt, session_id),
+                format!(
+                    "正在轮询 Microsoft Token，第 {} 次，session={}",
+                    poll_attempt, session_id
+                ),
             );
             let poll_params = [
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
@@ -291,7 +361,11 @@ pub async fn ms_login(
                     let body = match r.json::<serde_json::Value>().await {
                         Ok(body) => body,
                         Err(e) => {
-                            emit_text(&handle, "ms-login-error", format!("微软登录响应解析失败: {}", e));
+                            emit_text(
+                                &handle,
+                                "ms-login-error",
+                                format!("微软登录响应解析失败: {}", e),
+                            );
                             break;
                         }
                     };
@@ -352,7 +426,11 @@ pub async fn ms_login(
                                 break;
                             }
                             "expired_token" => {
-                                emit_text(&handle, "ms-login-error", "Microsoft 设备码已过期，请重新获取。");
+                                emit_text(
+                                    &handle,
+                                    "ms-login-error",
+                                    "Microsoft 设备码已过期，请重新获取。",
+                                );
                                 break;
                             }
                             _ => {
@@ -367,14 +445,22 @@ pub async fn ms_login(
                     }
                 }
                 Err(e) => {
-                    emit_text(&handle, "ms-login-error", format!("轮询微软登录失败: {}", e));
+                    emit_text(
+                        &handle,
+                        "ms-login-error",
+                        format!("轮询微软登录失败: {}", e),
+                    );
                     break;
                 }
             }
         }
 
         if is_current_ms_session(session_id) && std::time::Instant::now() >= expires_at {
-            emit_text(&handle, "ms-login-error", "Microsoft 设备码已过期，请重新获取。");
+            emit_text(
+                &handle,
+                "ms-login-error",
+                "Microsoft 设备码已过期，请重新获取。",
+            );
         }
     });
 
@@ -388,10 +474,10 @@ pub async fn authenticate_minecraft(
     handle: tauri::AppHandle,
     login_session_id: Option<u64>,
 ) -> Result<McProfile, String> {
-
     // --- Step 1: XBL ---
     emit_status(&handle, "XBL", "正在请求 Xbox Live Token");
-    let xbl_res = client.post("https://user.auth.xboxlive.com/user/authenticate")
+    let xbl_res = client
+        .post("https://user.auth.xboxlive.com/user/authenticate")
         .json(&serde_json::json!({
             "Properties": {
                 "AuthMethod": "RPS",
@@ -401,12 +487,19 @@ pub async fn authenticate_minecraft(
             "RelyingParty": "http://auth.xboxlive.com",
             "TokenType": "JWT"
         }))
-        .send().await.map_err(|e| format!("XBL Request Failed: {}", e))?;
+        .send()
+        .await
+        .map_err(|e| format!("XBL Request Failed: {}", e))?;
 
-    auth_debug("XBL", format!("user/authenticate HTTP {}", xbl_res.status()));
+    auth_debug(
+        "XBL",
+        format!("user/authenticate HTTP {}", xbl_res.status()),
+    );
     let xbl_data = response_json(xbl_res, "Xbox Live 认证").await?;
     let xbl_token = xbl_data["Token"].as_str().ok_or("XBL Token missing")?;
-    let user_hash = xbl_data["DisplayClaims"]["xui"][0]["uhs"].as_str().ok_or("UHS missing")?;
+    let user_hash = xbl_data["DisplayClaims"]["xui"][0]["uhs"]
+        .as_str()
+        .ok_or("UHS missing")?;
     emit_status(
         &handle,
         "XBL",
@@ -419,13 +512,16 @@ pub async fn authenticate_minecraft(
 
     // --- Step 2: XSTS ---
     emit_status(&handle, "XSTS", "正在请求 XSTS Token");
-    let xsts_res = client.post("https://xsts.auth.xboxlive.com/xsts/authorize")
+    let xsts_res = client
+        .post("https://xsts.auth.xboxlive.com/xsts/authorize")
         .json(&serde_json::json!({
             "Properties": { "SandboxId": "RETAIL", "UserTokens": [xbl_token] },
             "RelyingParty": "rp://api.minecraftservices.com/",
             "TokenType": "JWT"
         }))
-        .send().await.map_err(|e| format!("XSTS Request Failed: {}", e))?;
+        .send()
+        .await
+        .map_err(|e| format!("XSTS Request Failed: {}", e))?;
 
     auth_debug("XSTS", format!("xsts/authorize HTTP {}", xsts_res.status()));
     let xsts_data = response_json(xsts_res, "XSTS 授权").await?;
@@ -450,12 +546,18 @@ pub async fn authenticate_minecraft(
         .map_err(|e| format!("MC Login Request Failed: {}", e))?;
 
     let mc_login_status = mc_login_res.status();
-    auth_debug("Minecraft", format!("login_with_xbox HTTP {}", mc_login_status));
+    auth_debug(
+        "Minecraft",
+        format!("login_with_xbox HTTP {}", mc_login_status),
+    );
     let mc_data = response_body_json(mc_login_res, "Minecraft Services 登录").await?;
     auth_debug_json("Minecraft", &mc_data);
 
     if !mc_login_status.is_success() {
-        auth_debug("Minecraft", format!("login_with_xbox error body: {}", mc_data));
+        auth_debug(
+            "Minecraft",
+            format!("login_with_xbox error body: {}", mc_data),
+        );
         return Err(format_service_error(
             "Minecraft Services 登录",
             mc_login_status.as_u16(),
@@ -467,11 +569,20 @@ pub async fn authenticate_minecraft(
     if login_session_id.is_some_and(|session_id| !is_current_ms_session(session_id)) {
         return Err("登录会话已被新的 Microsoft 登录取代".into());
     }
-    let mc_access_token = mc_data["access_token"].as_str().ok_or("MC Access Token missing")?;
+    let mc_access_token = mc_data["access_token"]
+        .as_str()
+        .ok_or("MC Access Token missing")?;
+    let mc_expires_at = token_expires_at(
+        mc_data.get("expires_in").and_then(Value::as_u64),
+        MC_TOKEN_EXPIRES_IN_FALLBACK,
+    );
     emit_status(
         &handle,
         "Minecraft",
-        format!("Minecraft Access Token 获取成功，token_len={}", mc_access_token.len()),
+        format!(
+            "Minecraft Access Token 获取成功，token_len={}",
+            mc_access_token.len()
+        ),
     );
 
     // --- Step 4: Entitlements ---
@@ -479,13 +590,20 @@ pub async fn authenticate_minecraft(
 
     // --- Step 5: Profile ---
     emit_status(&handle, "Profile", "正在获取 Minecraft 档案");
-    let profile_res = client.get("https://api.minecraftservices.com/minecraft/profile")
+    let profile_res = client
+        .get("https://api.minecraftservices.com/minecraft/profile")
         .bearer_auth(mc_access_token)
-        .send().await.map_err(|e| format!("Profile Request Failed: {}", e))?;
+        .send()
+        .await
+        .map_err(|e| format!("Profile Request Failed: {}", e))?;
 
-    auth_debug("Profile", format!("minecraft/profile HTTP {}", profile_res.status()));
-    let profile = serde_json::from_value::<McProfile>(response_json(profile_res, "Minecraft 档案").await?)
-        .map_err(|e| format!("Profile Parse Error: {}", e))?;
+    auth_debug(
+        "Profile",
+        format!("minecraft/profile HTTP {}", profile_res.status()),
+    );
+    let profile =
+        serde_json::from_value::<McProfile>(response_json(profile_res, "Minecraft 档案").await?)
+            .map_err(|e| format!("Profile Parse Error: {}", e))?;
     if login_session_id.is_some_and(|session_id| !is_current_ms_session(session_id)) {
         return Err("登录会话已被新的 Microsoft 登录取代".into());
     }
@@ -494,11 +612,13 @@ pub async fn authenticate_minecraft(
         "Profile",
         format!("档案获取成功，name={}，uuid={}", profile.name, profile.id),
     );
-    let skin_url = profile.skins.iter()
-            .find(|s| s.state == "ACTIVE")
-            .or_else(|| profile.skins.first())
-            .map(|s| s.url.clone())
-            .unwrap_or_default();
+    let skin_url = profile
+        .skins
+        .iter()
+        .find(|s| s.state == "ACTIVE")
+        .or_else(|| profile.skins.first())
+        .map(|s| s.url.clone())
+        .unwrap_or_default();
     // --- Step 6: 获取状态并持久化 ---
     {
         let state = handle.state::<Mutex<AuthState>>();
@@ -510,8 +630,10 @@ pub async fn authenticate_minecraft(
             name: profile.name.clone(),
             access_token: mc_access_token.to_string(),
             refresh_token: ms_refresh_token.to_string(),
+            client_token: "".into(),
             auth_type: "Microsoft".into(),
             skin_url,
+            expires_at: mc_expires_at,
         });
         s.current_user_id = Some(profile.id.clone());
 
@@ -544,8 +666,12 @@ pub async fn yggdrasil_login(
         "requestUser": true
     });
 
-    let res = client.post("https://littleskin.cn/api/yggdrasil/authserver/authenticate")
-        .json(&body).send().await.map_err(|e| e.to_string())?;
+    let res = client
+        .post("https://littleskin.cn/api/yggdrasil/authserver/authenticate")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
 
     let data: Value = res.json().await.map_err(|e| e.to_string())?;
     if let Some(msg) = data.get("errorMessage").and_then(|v| v.as_str()) {
@@ -553,7 +679,8 @@ pub async fn yggdrasil_login(
     }
 
     if let Some(selected) = data.get("selectedProfile").filter(|v| !v.is_null()) {
-        let user = process_user_info(&client, &data["accessToken"], selected).await?;
+        let mut user = process_user_info(&client, &data["accessToken"], selected).await?;
+        user.client_token = data["clientToken"].as_str().unwrap_or("").to_string();
         let mut s = state.lock().unwrap();
         s.users.retain(|u| u.uuid != user.uuid);
         s.users.push(user.clone());
@@ -575,15 +702,25 @@ pub async fn yggdrasil_select(
     payload: SelectPayload,
     state: tauri::State<'_, Mutex<AuthState>>,
 ) -> Result<UserInfo, String> {
-    let res = client.post("https://littleskin.cn/api/yggdrasil/authserver/refresh")
+    let client_token = payload.client_token.clone();
+    let res = client
+        .post("https://littleskin.cn/api/yggdrasil/authserver/refresh")
         .json(&serde_json::json!({
             "accessToken": payload.access_token,
-            "clientToken": payload.client_token,
+            "clientToken": &client_token,
             "selectedProfile": payload.profile
-        })).send().await.map_err(|e| e.to_string())?;
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
 
     let data: Value = res.json().await.map_err(|e| e.to_string())?;
-    let user = process_user_info(&client, &data["accessToken"], &data["selectedProfile"]).await?;
+    let mut user =
+        process_user_info(&client, &data["accessToken"], &data["selectedProfile"]).await?;
+    user.client_token = data["clientToken"]
+        .as_str()
+        .unwrap_or(&client_token)
+        .to_string();
 
     let mut s = state.lock().unwrap();
     s.users.retain(|u| u.uuid != user.uuid);
@@ -601,68 +738,163 @@ pub async fn ensure_authenticated(
     handle: tauri::AppHandle,
     client: tauri::State<'_, Client>,
 ) -> Result<(), String> {
-      match auth_type {
+    match auth_type {
         "Yggdrasil" => {
             let base_url = "https://littleskin.cn/api/yggdrasil/authserver";
+            let current_client_token = {
+                let s = state.lock().unwrap();
+                s.users
+                    .iter()
+                    .find(|u| u.uuid == uuid)
+                    .map(|u| u.client_token.clone())
+                    .unwrap_or_default()
+            };
 
             // 1. Validate
-            let val_res = client.post(format!("{}/validate", base_url))
-                .json(&serde_json::json!({ "accessToken": access_token }))
-                .send().await.map_err(|e| e.to_string())?;
+            let val_res = client
+                .post(format!("{}/validate", base_url))
+                .json(&yggdrasil_token_body(
+                    access_token,
+                    &current_client_token,
+                    false,
+                ))
+                .send()
+                .await
+                .map_err(|e| format!("认证失败: Yggdrasil 验证请求失败: {}", e))?;
 
-            if val_res.status() == 204 { return Ok(()); }
+            if val_res.status() == 204 {
+                return Ok(());
+            }
+            let validate_status = val_res.status();
+            if !matches!(validate_status.as_u16(), 400 | 401 | 403) {
+                return Err(format!(
+                    "认证失败: Yggdrasil 验证服务暂时不可用 (HTTP {})",
+                    validate_status.as_u16()
+                ));
+            }
 
             // 2. Refresh
-            let ref_res = client.post(format!("{}/refresh", base_url))
-                .json(&serde_json::json!({ "accessToken": access_token, "requestUser": true }))
-                .send().await.map_err(|e| e.to_string())?;
+            let ref_res = client
+                .post(format!("{}/refresh", base_url))
+                .json(&yggdrasil_token_body(
+                    access_token,
+                    &current_client_token,
+                    true,
+                ))
+                .send()
+                .await
+                .map_err(|e| format!("认证失败: Yggdrasil 刷新请求失败: {}", e))?;
 
-            if ref_res.status().is_success() {
-                let data: serde_json::Value = ref_res.json().await.map_err(|e| e.to_string())?;
-                let updated_user = process_user_info(&client, &data["accessToken"], &data["selectedProfile"]).await?;
+            let refresh_status = ref_res.status();
+            let data = response_body_json(ref_res, "刷新 Yggdrasil Token")
+                .await
+                .map_err(|e| format!("认证失败: {}", e))?;
+            if refresh_status.is_success() {
+                let mut updated_user =
+                    process_user_info(&client, &data["accessToken"], &data["selectedProfile"])
+                        .await?;
+                updated_user.client_token = data["clientToken"]
+                    .as_str()
+                    .unwrap_or(&current_client_token)
+                    .to_string();
 
                 let mut s = state.lock().unwrap();
                 s.users.retain(|u| u.uuid != uuid);
+                s.current_user_id = Some(updated_user.uuid.clone());
                 s.users.push(updated_user);
                 let _ = s.save();
                 return Ok(());
             }
 
-            Err("YGGDRASIL_TOKEN_EXPIRED".into())
-        },
+            if matches!(refresh_status.as_u16(), 400 | 401 | 403) {
+                Err("YGGDRASIL_TOKEN_EXPIRED".into())
+            } else {
+                Err(format!(
+                    "认证失败: Yggdrasil Token 刷新失败 (HTTP {}): {}",
+                    refresh_status.as_u16(),
+                    service_error_message(&data)
+                ))
+            }
+        }
         "Microsoft" => {
-                    let prof_res = client.get("https://api.minecraftservices.com/minecraft/profile")
-                        .bearer_auth(access_token)
-                        .send().await.map_err(|e| e.to_string())?;
+            let (current_refresh_token, expires_at) = {
+                let s = state.lock().unwrap();
+                let user = s
+                    .users
+                    .iter()
+                    .find(|u| u.uuid == uuid)
+                    .ok_or("User credential not found in state")?;
+                (user.refresh_token.clone(), user.expires_at)
+            };
 
-                    if prof_res.status().is_success() {
-                        return Ok(());
+            if current_refresh_token.trim().is_empty() {
+                return Err("MS_TOKEN_EXPIRED".into());
+            }
+
+            if is_token_fresh(expires_at) {
+                auth_debug("Microsoft", "cached Minecraft access token is still fresh");
+                return Ok(());
+            }
+
+            if expires_at.is_none() {
+                let prof_res = client
+                    .get("https://api.minecraftservices.com/minecraft/profile")
+                    .bearer_auth(access_token)
+                    .send()
+                    .await
+                    .map_err(|e| format!("认证失败: Microsoft 档案验证请求失败: {}", e))?;
+
+                let profile_status = prof_res.status();
+                if profile_status.is_success() {
+                    return Ok(());
+                }
+
+                if !matches!(profile_status.as_u16(), 401 | 403) {
+                    return Err(format!(
+                        "认证失败: Microsoft 档案验证失败 (HTTP {})",
+                        profile_status.as_u16()
+                    ));
+                }
+            }
+
+            println!("[Auth] Microsoft Access Token is stale, attempting silent refresh...");
+
+            let (new_ms_access, new_ms_refresh) =
+                match refresh_ms_token(client.clone(), &current_refresh_token).await {
+                    Ok(tokens) => tokens,
+                    Err(TokenRefreshError::Expired(message)) => {
+                        auth_debug("MSRefresh", message);
+                        return Err("MS_TOKEN_EXPIRED".into());
                     }
+                    Err(TokenRefreshError::Temporary(message)) => {
+                        return Err(format!(
+                            "认证失败: Microsoft Token 刷新暂时不可用: {}",
+                            message
+                        ));
+                    }
+                };
 
-                    println!("[Auth] Microsoft Access Token expired, attempting silent refresh...");
+            authenticate_minecraft(
+                client.inner().clone(),
+                &new_ms_access,
+                &new_ms_refresh,
+                handle,
+                None,
+            )
+            .await?;
 
-                    let current_refresh_token = {
-                        let s = state.lock().unwrap();
-                        s.users.iter()
-                            .find(|u| u.uuid == uuid)
-                            .map(|u| u.refresh_token.clone())
-                            .ok_or("User credential not found in state")?
-                    };
-
-                    let (new_ms_access, new_ms_refresh) = refresh_ms_token(client.clone(), &current_refresh_token).await
-                        .map_err(|_| "MS_TOKEN_EXPIRED".to_string())?;
-
-                    authenticate_minecraft(client.inner().clone(), &new_ms_access, &new_ms_refresh, handle, None).await?;
-
-                    Ok(())
-                },
-                _ => Ok(()),
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 
-pub async fn refresh_ms_token(client: tauri::State<'_, Client>, refresh_token: &str) -> Result<(String, String), String> {
+async fn refresh_ms_token(
+    client: tauri::State<'_, Client>,
+    refresh_token: &str,
+) -> Result<(String, String), TokenRefreshError> {
     let url = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
-    let client_id = microsoft_client_id()?;
+    let client_id = microsoft_client_id().map_err(TokenRefreshError::Temporary)?;
 
     let params = [
         ("client_id", client_id),
@@ -671,15 +903,29 @@ pub async fn refresh_ms_token(client: tauri::State<'_, Client>, refresh_token: &
         ("scope", MS_SCOPE),
     ];
 
-    let res = client.post(url)
-        .form(&params)
-        .send()
+    let res =
+        client.post(url).form(&params).send().await.map_err(|e| {
+            TokenRefreshError::Temporary(format!("MS Refresh Network Error: {}", e))
+        })?;
+
+    let status = res.status();
+    auth_debug("MSRefresh", format!("refresh_token HTTP {}", status));
+    let data = response_body_json(res, "刷新 Microsoft Token")
         .await
-        .map_err(|e| format!("MS Refresh Network Error: {}", e))?;
+        .map_err(TokenRefreshError::Temporary)?;
+    auth_debug_json("MSRefresh", &data);
 
-    let data = response_json(res, "刷新 Microsoft Token").await?;
+    if !status.is_success() {
+        let message = format_service_error("刷新 Microsoft Token", status.as_u16(), &data);
+        if is_microsoft_refresh_expired(&data) {
+            return Err(TokenRefreshError::Expired(message));
+        }
+        return Err(TokenRefreshError::Temporary(message));
+    }
 
-    let new_access = data["access_token"].as_str().ok_or("No access token")?;
+    let new_access = data["access_token"].as_str().ok_or_else(|| {
+        TokenRefreshError::Temporary("Microsoft 刷新响应缺少 access_token".into())
+    })?;
     let new_refresh = data["refresh_token"].as_str().unwrap_or(refresh_token);
 
     Ok((new_access.to_string(), new_refresh.to_string()))
