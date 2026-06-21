@@ -2,16 +2,18 @@ use crate::models::*;
 use chrono::{SecondsFormat, Utc};
 use flate2::read::DeflateDecoder;
 use futures::StreamExt;
+use reqwest::header::{CACHE_CONTROL, PRAGMA};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
 use sha1::{Digest, Sha1};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::Emitter;
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -23,6 +25,12 @@ use std::os::windows::process::CommandExt;
 
 const REMOTE_MANIFEST_URL: &str = "https://gitee.com/hysand/CirCube/raw/main/manifest.json";
 const BMCLAPI_BASE_URL: &str = "https://bmclapi2.bangbang93.com";
+const PACK_LOW_SPEED_WINDOW_SECS: u64 = 10;
+const PACK_LOW_SPEED_THRESHOLD_BYTES: u64 = 500_000;
+
+static PACK_SOURCE_GENERATION: AtomicUsize = AtomicUsize::new(0);
+static PACK_SOURCE_IS_CHINA: AtomicBool = AtomicBool::new(false);
+static PACK_SOURCE_SWITCH_NOTIFY: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
 #[derive(Deserialize)]
 struct MinecraftVersionMeta {
@@ -146,6 +154,14 @@ fn manifest_info(manifest: &Manifest) -> ManifestInfo {
     }
 }
 
+fn remote_manifest_url(force_refresh: bool) -> String {
+    if force_refresh {
+        format!("{}?t={}", REMOTE_MANIFEST_URL, Utc::now().timestamp_millis())
+    } else {
+        REMOTE_MANIFEST_URL.to_string()
+    }
+}
+
 fn local_manifest_path() -> Result<PathBuf, String> {
     let exe_path = std::env::current_exe()
         .map_err(|e| e.to_string())?
@@ -180,9 +196,108 @@ fn emit_progress(app_handle: &tauri::AppHandle, file: impl Into<String>) {
     );
 }
 
+fn pack_download_url(config_state: &Mutex<Config>, path: &str) -> String {
+    let base_url = {
+        let config = config_state.lock().unwrap();
+        config.download_source.base_url().to_string()
+    };
+    let encoded_path = path
+        .replace('\\', "/")
+        .split('/')
+        .map(|segment| encode(segment).into_owned())
+        .collect::<Vec<String>>()
+        .join("/");
+    format!("{}/{}", base_url.trim_end_matches('/'), encoded_path)
+}
+
+fn is_pack_source_switch_error(error: &str) -> bool {
+    error.contains("下载源已切换")
+}
+
+async fn monitor_download_speed(
+    app_handle: tauri::AppHandle,
+    downloaded_bytes: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    allow_source_switch_prompt: bool,
+) {
+    let started_at = Instant::now();
+    let mut samples = VecDeque::from([(started_at, 0usize)]);
+    let mut last_sample_at = started_at;
+    let mut last_sample_bytes = 0usize;
+    let mut low_speed_latched = false;
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.tick().await;
+
+    loop {
+        interval.tick().await;
+
+        let now = Instant::now();
+        let total_bytes = downloaded_bytes.load(Ordering::SeqCst);
+        let current_bytes_per_sec = {
+            let elapsed = now.duration_since(last_sample_at).as_secs_f64();
+            let bytes = total_bytes.saturating_sub(last_sample_bytes);
+            last_sample_at = now;
+            last_sample_bytes = total_bytes;
+            if elapsed > 0.0 {
+                (bytes as f64 / elapsed) as u64
+            } else {
+                0
+            }
+        };
+        samples.push_back((now, total_bytes));
+
+        let cutoff = now
+            .checked_sub(Duration::from_secs(PACK_LOW_SPEED_WINDOW_SECS))
+            .unwrap_or(started_at);
+        while samples.front().is_some_and(|(at, _)| *at < cutoff) {
+            samples.pop_front();
+        }
+
+        let observed_window = now
+            .duration_since(started_at)
+            .min(Duration::from_secs(PACK_LOW_SPEED_WINDOW_SECS));
+        if !observed_window.is_zero() {
+            let oldest_bytes = samples
+                .front()
+                .map(|(_, bytes)| *bytes)
+                .unwrap_or(total_bytes);
+            let bytes_in_window = total_bytes.saturating_sub(oldest_bytes);
+            let average_bytes_per_sec =
+                (bytes_in_window as f64 / observed_window.as_secs_f64()) as u64;
+            if allow_source_switch_prompt
+                && now.duration_since(started_at)
+                >= Duration::from_secs(PACK_LOW_SPEED_WINDOW_SECS)
+                && average_bytes_per_sec < PACK_LOW_SPEED_THRESHOLD_BYTES
+            {
+                low_speed_latched = true;
+            }
+            let source = if PACK_SOURCE_IS_CHINA.load(Ordering::SeqCst) {
+                DownloadSource::ChinaCdn
+            } else {
+                DownloadSource::Overseas
+            };
+
+            let _ = app_handle.emit(
+                "download-speed",
+                DownloadSpeedPayload {
+                    average_bytes_per_sec,
+                    current_bytes_per_sec,
+                    low_speed: low_speed_latched,
+                    source,
+                },
+            );
+        }
+
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn get_manifest_versions(
     client: tauri::State<'_, Client>,
+    force_refresh: Option<bool>,
 ) -> Result<ManifestVersions, String> {
     let local = match std::fs::read_to_string(local_manifest_path()?) {
         Ok(content) => serde_json::from_str::<Manifest>(&content)
@@ -192,7 +307,9 @@ pub async fn get_manifest_versions(
     };
 
     let remote_manifest: Manifest = client
-        .get(REMOTE_MANIFEST_URL)
+        .get(remote_manifest_url(force_refresh.unwrap_or(false)))
+        .header(CACHE_CONTROL, "no-cache")
+        .header(PRAGMA, "no-cache")
         .send()
         .await
         .map_err(|e| format!("获取远程 manifest 失败: {}", e))?
@@ -215,6 +332,19 @@ pub async fn get_manifest_versions(
 }
 
 #[tauri::command]
+pub fn switch_to_china_cdn(
+    config_state: tauri::State<'_, Mutex<Config>>,
+) -> Result<Config, String> {
+    let mut config = config_state.lock().unwrap();
+    config.download_source = DownloadSource::ChinaCdn;
+    config.save().map_err(|e| e.to_string())?;
+    PACK_SOURCE_IS_CHINA.store(true, Ordering::SeqCst);
+    PACK_SOURCE_GENERATION.fetch_add(1, Ordering::SeqCst);
+    PACK_SOURCE_SWITCH_NOTIFY.notify_waiters();
+    Ok(config.clone())
+}
+
+#[tauri::command]
 pub async fn sync_versions(
     client: tauri::State<'_, Client>,
     app_handle: tauri::AppHandle,
@@ -230,14 +360,17 @@ pub async fn sync_versions(
     let base_dir = exe_path.join(".minecraft");
     let launcher_dir = exe_path.join("launcher");
     let local_manifest_path = launcher_dir.join("manifest.json");
-    let (java_path, download_base_url) = {
+    let java_path = {
         let config = config_state.lock().unwrap();
-        let java_path = if config.java_path.trim().is_empty() {
+        PACK_SOURCE_IS_CHINA.store(
+            config.download_source == DownloadSource::ChinaCdn,
+            Ordering::SeqCst,
+        );
+        if config.java_path.trim().is_empty() {
             "java".to_string()
         } else {
             config.java_path.clone()
-        };
-        (java_path, config.download_source.base_url().to_string())
+        }
     };
 
     let mut minecraft_version_dir = String::from("UNKNOWN");
@@ -257,7 +390,9 @@ pub async fn sync_versions(
 
     // 3. 第二阶段：网络请求获取远程清单
     let remote_manifest: Manifest = client
-        .get(REMOTE_MANIFEST_URL)
+        .get(remote_manifest_url(true))
+        .header(CACHE_CONTROL, "no-cache")
+        .header(PRAGMA, "no-cache")
         .send()
         .await
         .map_err(|e| format!("网络请求失败: {}", e))?
@@ -338,6 +473,15 @@ pub async fn sync_versions(
         let counter = Arc::new(AtomicUsize::new(0));
         let semaphore = Arc::new(tokio::sync::Semaphore::new(5)); // 限制并发数
         let client_arc = client.inner();
+        let config_state_ref = config_state.inner();
+        let downloaded_bytes = Arc::new(AtomicUsize::new(0));
+        let speed_monitor_stop = Arc::new(AtomicBool::new(false));
+        let speed_monitor = tokio::spawn(monitor_download_speed(
+            app_handle.clone(),
+            downloaded_bytes.clone(),
+            speed_monitor_stop.clone(),
+            true,
+        ));
 
         let fetches =
             futures::stream::iter(download_queue.into_iter().map(|(path, target_hash)| {
@@ -346,27 +490,31 @@ pub async fn sync_versions(
                 let cnt = counter.clone();
                 let sem = semaphore.clone();
                 let b_dir = base_dir.clone();
-                let base_url = download_base_url.clone();
+                let config_state = config_state_ref;
+                let downloaded_bytes = downloaded_bytes.clone();
 
                 async move {
                     let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                     let mut attempts = 0;
                     let max_retries = 3;
 
-                    let encoded_path = path
-                        .replace('\\', "/")
-                        .split('/')
-                        .map(|segment| encode(segment).into_owned())
-                        .collect::<Vec<String>>()
-                        .join("/");
-
-                    let url = format!("{}/{}", base_url.trim_end_matches('/'), encoded_path);
-                    println!("{}", url);
-
                     let dest = b_dir.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
 
                     loop {
-                        match download_file_streamed(&c, &url, &dest, Some(&target_hash)).await {
+                        let source_generation = PACK_SOURCE_GENERATION.load(Ordering::SeqCst);
+                        let url = pack_download_url(config_state, &path);
+                        println!("{}", url);
+
+                        match download_pack_file_streamed(
+                            &c,
+                            &url,
+                            &dest,
+                            Some(&target_hash),
+                            source_generation,
+                            &downloaded_bytes,
+                        )
+                        .await
+                        {
                             Ok(_) => {
                                 let current = cnt.fetch_add(1, Ordering::SeqCst) + 1;
                                 let _ = h.emit(
@@ -378,6 +526,9 @@ pub async fn sync_versions(
                                     },
                                 );
                                 return Ok::<(), String>(());
+                            }
+                            Err(e) if is_pack_source_switch_error(&e) => {
+                                continue;
                             }
                             Err(_e) if attempts < max_retries => {
                                 attempts += 1;
@@ -391,6 +542,8 @@ pub async fn sync_versions(
             .buffer_unordered(5);
 
         let results: Vec<_> = fetches.collect().await;
+        speed_monitor_stop.store(true, Ordering::SeqCst);
+        let _ = speed_monitor.await;
         for res in results {
             res?;
         }
@@ -403,7 +556,7 @@ pub async fn sync_versions(
         &base_dir,
         &minecraft_version_dir,
         &java_path,
-        needs_sync,
+        false,
     )
     .await?;
 
@@ -543,6 +696,16 @@ async fn ensure_download_from_urls(
     dest: &Path,
     expected_hash: Option<&str>,
 ) -> Result<(), String> {
+    ensure_download_from_urls_with_progress(client, urls, dest, expected_hash, None).await
+}
+
+async fn ensure_download_from_urls_with_progress(
+    client: &Client,
+    urls: &[String],
+    dest: &Path,
+    expected_hash: Option<&str>,
+    downloaded_bytes: Option<&Arc<AtomicUsize>>,
+) -> Result<(), String> {
     if dest.exists() {
         if let Some(expected_hash) = expected_hash {
             if calculate_sha1(dest).await.ok().as_deref() == Some(expected_hash) {
@@ -555,7 +718,7 @@ async fn ensure_download_from_urls(
 
     let mut last_error = None;
     for url in urls {
-        match download_file_streamed(client, url, dest, expected_hash).await {
+        match download_file_streamed(client, url, dest, expected_hash, downloaded_bytes).await {
             Ok(_) => return Ok(()),
             Err(e) => last_error = Some(e),
         }
@@ -599,6 +762,14 @@ async fn run_download_jobs(
     let counter = Arc::new(AtomicUsize::new(0));
     let semaphore = Arc::new(tokio::sync::Semaphore::new(8));
     let client = client.clone();
+    let downloaded_bytes = Arc::new(AtomicUsize::new(0));
+    let speed_monitor_stop = Arc::new(AtomicBool::new(false));
+    let speed_monitor = tokio::spawn(monitor_download_speed(
+        app_handle.clone(),
+        downloaded_bytes.clone(),
+        speed_monitor_stop.clone(),
+        false,
+    ));
 
     let fetches = futures::stream::iter(jobs.into_iter().map(|job| {
         let client = client.clone();
@@ -606,10 +777,18 @@ async fn run_download_jobs(
         let counter = counter.clone();
         let semaphore = semaphore.clone();
         let label = label.to_string();
+        let downloaded_bytes = downloaded_bytes.clone();
 
         async move {
             let _permit = semaphore.acquire().await.map_err(|e| e.to_string())?;
-            ensure_download_from_urls(&client, &job.urls, &job.dest, job.sha1.as_deref()).await?;
+            ensure_download_from_urls_with_progress(
+                &client,
+                &job.urls,
+                &job.dest,
+                job.sha1.as_deref(),
+                Some(&downloaded_bytes),
+            )
+            .await?;
             let current = counter.fetch_add(1, Ordering::SeqCst) + 1;
             let _ = app_handle.emit(
                 "download-progress",
@@ -625,6 +804,8 @@ async fn run_download_jobs(
     .buffer_unordered(8);
 
     let results: Vec<_> = fetches.collect().await;
+    speed_monitor_stop.store(true, Ordering::SeqCst);
+    let _ = speed_monitor.await;
     for result in results {
         result?;
     }
@@ -1881,6 +2062,7 @@ async fn download_file_streamed(
     url: &str,
     dest: &Path,
     expected_hash: Option<&str>,
+    downloaded_bytes: Option<&Arc<AtomicUsize>>,
 ) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)
@@ -1902,6 +2084,87 @@ async fn download_file_streamed(
         let chunk = item.map_err(|e| e.to_string())?;
         hasher.update(&chunk);
         file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+        if let Some(downloaded_bytes) = downloaded_bytes {
+            downloaded_bytes.fetch_add(chunk.len(), Ordering::SeqCst);
+        }
+    }
+
+    file.flush().await.map_err(|e| e.to_string())?;
+
+    let actual_hash = hex::encode(hasher.finalize());
+    if expected_hash.is_some_and(|hash| actual_hash != hash) {
+        let _ = fs::remove_file(&tmp_path).await;
+        return Err(format!("{} -> Hash 校验失败，文件可能损坏", url));
+    }
+
+    fs::rename(tmp_path, dest)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+async fn download_pack_file_streamed(
+    client: &Client,
+    url: &str,
+    dest: &Path,
+    expected_hash: Option<&str>,
+    source_generation: usize,
+    downloaded_bytes: &Arc<AtomicUsize>,
+) -> Result<(), String> {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    let tmp_path = dest.with_extension("tmp");
+    if PACK_SOURCE_GENERATION.load(Ordering::SeqCst) != source_generation {
+        let _ = fs::remove_file(&tmp_path).await;
+        return Err("下载源已切换，正在重试".to_string());
+    }
+
+    let source_switched = PACK_SOURCE_SWITCH_NOTIFY.notified();
+    tokio::pin!(source_switched);
+    if PACK_SOURCE_GENERATION.load(Ordering::SeqCst) != source_generation {
+        let _ = fs::remove_file(&tmp_path).await;
+        return Err("下载源已切换，正在重试".to_string());
+    }
+
+    let resp = tokio::select! {
+        _ = &mut source_switched => {
+            let _ = fs::remove_file(&tmp_path).await;
+            return Err("下载源已切换，正在重试".to_string());
+        }
+        result = client.get(url).send() => result.map_err(|e| e.to_string())?,
+    };
+    if !resp.status().is_success() {
+        return Err(format!("{} -> HTTP {}", url, resp.status()));
+    }
+
+    let mut file = File::create(&tmp_path).await.map_err(|e| e.to_string())?;
+    let mut hasher = Sha1::new();
+    let mut stream = resp.bytes_stream();
+
+    loop {
+        if PACK_SOURCE_GENERATION.load(Ordering::SeqCst) != source_generation {
+            let _ = fs::remove_file(&tmp_path).await;
+            return Err("下载源已切换，正在重试".to_string());
+        }
+
+        let Some(item) = (tokio::select! {
+            _ = &mut source_switched => {
+                let _ = fs::remove_file(&tmp_path).await;
+                return Err("下载源已切换，正在重试".to_string());
+            }
+            item = stream.next() => item,
+        }) else {
+            break;
+        };
+
+        let chunk = item.map_err(|e| e.to_string())?;
+        hasher.update(&chunk);
+        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+        downloaded_bytes.fetch_add(chunk.len(), Ordering::SeqCst);
     }
 
     file.flush().await.map_err(|e| e.to_string())?;

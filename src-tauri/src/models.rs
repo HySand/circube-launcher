@@ -210,4 +210,13 @@ pub struct ProgressPayload {
     pub file: String,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadSpeedPayload {
+    pub average_bytes_per_sec: u64,
+    pub current_bytes_per_sec: u64,
+    pub low_speed: bool,
+    pub source: DownloadSource,
+}
+
 pub static VERSION: OnceLock<String> = OnceLock::new();

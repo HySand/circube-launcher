@@ -152,7 +152,7 @@
       <section class="space-y-5">
         <div class="flex items-center justify-between px-1">
           <h3 class="text-[13px] font-black text-slate-400 uppercase tracking-[0.2em]">整合包版本</h3>
-          <button @click="loadManifestVersions" :disabled="isCheckingManifest || isUpdatingPack"
+          <button @click="loadManifestVersions(true)" :disabled="isCheckingManifest || isUpdatingPack"
                   class="text-[12px] font-black text-blue-600 hover:text-blue-700 uppercase disabled:opacity-30">
             {{ isCheckingManifest ? '检查中' : '刷新' }}
           </button>
@@ -257,10 +257,10 @@ interface ManifestInfo { version: string; manifestVersion: string }
 interface ManifestVersions { local: ManifestInfo | null; remote: ManifestInfo; needsUpdate: boolean }
 const manifestVersions = ref<ManifestVersions | null>(null)
 
-const loadManifestVersions = async () => {
+const loadManifestVersions = async (forceRefresh = false) => {
   isCheckingManifest.value = true
   try {
-    manifestVersions.value = await invoke<ManifestVersions>('get_manifest_versions')
+    manifestVersions.value = await invoke<ManifestVersions>('get_manifest_versions', { forceRefresh })
   } catch (error) {
     toast.error("整合包版本检查失败: " + error, { duration: 10000 })
   } finally {
@@ -365,7 +365,7 @@ onMounted(async () => {
     }
   });
 
-  await loadManifestVersions()
+  await loadManifestVersions(false)
 })
 
 onUnmounted(() => resizeObserver?.disconnect())

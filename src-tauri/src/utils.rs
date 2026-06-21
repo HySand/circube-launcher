@@ -201,9 +201,9 @@ pub fn validate_java(path: String) -> Result<JavaInfo, String> {
                             .and_then(|m| m.as_str().parse::<u32>().ok())
                             .ok_or_else(|| format!("无法解析 Java 主版本号: {}", display_name))?;
 
-                        if major_version < 17 || major_version > 21 {
+                        if major_version < 21 {
                             return Err(format!(
-                                "Java 版本不符合要求：检测到 Java {}，但当前游戏版本需要 Java 17 至 21 之间的环境。",
+                                "Java 版本不符合要求：检测到 Java {}，但当前游戏版本需要 Java 21 或更高版本的环境。",
                                 major_version
                             ));
                         }

@@ -5,6 +5,11 @@
     <p class="text-base text-gray-500 font-medium tracking-tight animate-pulse min-h-[1.5rem]">
       {{ statusText }}
     </p>
+
+    <button v-if="showSwitchCdnButton" type="button" :disabled="isSwitchingCdn" @click="switchToChinaCdn"
+            class="h-10 rounded-full bg-blue-600 px-5 text-[12px] font-black text-white shadow-sm transition active:scale-[0.98] disabled:opacity-50">
+      {{ isSwitchingCdn ? '切换中...' : '切换下载源？' }}
+    </button>
   </div>
 </template>
 
@@ -20,7 +25,12 @@ import { toast } from 'vue-sonner';
 const router = useRouter()
 const cache = useCacheStore()
 const statusText = ref("正在启动启动器...");
+const showSwitchCdnButton = ref(false);
+const isSwitchingCdn = ref(false);
+const currentSpeedText = ref("0KB/s");
+const downloadProgress = ref<{ current: number; total: number; label: string } | null>(null);
 let unlisten: UnlistenFn;
+let unlistenSpeed: UnlistenFn;
 
 const fetchQuote = async () => {
   const response = await fetch("https://v1.hitokoto.cn/?c=d")
@@ -31,6 +41,39 @@ const fetchQuote = async () => {
 interface UserInfo { uuid: string; name: string; accessToken: string; skinUrl: string; authType: string }
 interface Config { javaPath: string; maxMemory: number; downloadSource: 'overseas' | 'chinaCdn' }
 interface JavaInfo { path: string; version: string }
+interface DownloadSpeedPayload {
+  averageBytesPerSec: number;
+  currentBytesPerSec: number;
+  lowSpeed: boolean;
+  source: 'overseas' | 'chinaCdn';
+}
+
+const formatSpeed = (bytesPerSec: number) => {
+  if (bytesPerSec >= 1024 * 1024) return `${(bytesPerSec / 1024 / 1024).toFixed(1)}MB/s`
+  return `${Math.max(0, Math.round(bytesPerSec / 1024))}KB/s`
+}
+
+const updateDownloadStatusText = () => {
+  if (!downloadProgress.value) return
+  const { current, total, label } = downloadProgress.value
+  statusText.value = `正在更新${label} ${current}/${total} (${currentSpeedText.value})`
+}
+
+const switchToChinaCdn = async () => {
+  if (isSwitchingCdn.value) return
+  isSwitchingCdn.value = true
+  try {
+    const newConfig = await invoke<Config>('switch_to_china_cdn')
+    cache.setSettings(newConfig)
+    showSwitchCdnButton.value = false
+    statusText.value = "已切换至 CDN，正在重试..."
+    toast.success("已切换至 CDN", { duration: 1500 })
+  } catch (e) {
+    toast.error("切换 CDN 失败: " + e, { duration: 10000 })
+  } finally {
+    isSwitchingCdn.value = false
+  }
+}
 
 onMounted(async () => {
   fetchQuote();
@@ -45,13 +88,34 @@ onMounted(async () => {
     (event) => {
       const { current, total } = event.payload;
       if (total > 0) {
-        const label = event.payload.file?.startsWith("Minecraft") ? event.payload.file : "整合包资源";
-        statusText.value = `正在更新${label} (${current}/${total})`;
+        const progressFile = event.payload.file ?? "";
+        const isNamedResource = /^(Minecraft|NeoForge|Forge)\b/i.test(progressFile);
+        const label = isNamedResource ? progressFile : "整合包资源";
+        if (downloadProgress.value?.label !== label) {
+          currentSpeedText.value = "0KB/s";
+        }
+        if (isNamedResource) {
+          showSwitchCdnButton.value = false;
+        }
+        downloadProgress.value = { current, total, label };
+        updateDownloadStatusText();
       } else {
+        downloadProgress.value = null;
         statusText.value = event.payload.file && event.payload.file !== "/"
           ? event.payload.file
           : "检测到新版本，正在更新...";
       }
+    }
+  );
+  unlistenSpeed = await listen<DownloadSpeedPayload>(
+    'download-speed',
+    (event) => {
+      currentSpeedText.value = formatSpeed(event.payload.currentBytesPerSec)
+      updateDownloadStatusText()
+      showSwitchCdnButton.value =
+        event.payload.lowSpeed
+        && event.payload.source !== 'chinaCdn'
+        && cache.settings.downloadSource !== 'chinaCdn'
     }
   );
 
@@ -120,5 +184,6 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (unlisten) unlisten();
+  if (unlistenSpeed) unlistenSpeed();
 });
 </script>
