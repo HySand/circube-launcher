@@ -2,8 +2,8 @@ use crate::models::*;
 use chrono::{SecondsFormat, Utc};
 use flate2::read::DeflateDecoder;
 use futures::StreamExt;
-use reqwest::header::{CACHE_CONTROL, PRAGMA};
-use reqwest::Client;
+use reqwest::header::{CACHE_CONTROL, CONTENT_RANGE, PRAGMA, RANGE};
+use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use serde_json::Value;
 use sha1::{Digest, Sha1};
@@ -27,6 +27,10 @@ const REMOTE_MANIFEST_URL: &str = "https://gitee.com/hysand/CirCube/raw/main/man
 const BMCLAPI_BASE_URL: &str = "https://bmclapi2.bangbang93.com";
 const PACK_LOW_SPEED_WINDOW_SECS: u64 = 10;
 const PACK_LOW_SPEED_THRESHOLD_BYTES: u64 = 500_000;
+const SINGLE_FILE_PARALLEL_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
+const SINGLE_FILE_PARALLEL_CHUNK_BYTES: u64 = 4 * 1024 * 1024;
+const SINGLE_FILE_PARALLEL_PARTS: usize = 4;
+const DOWNLOAD_SOURCE_SWITCHED_MESSAGE: &str = "下载源已切换，正在重试";
 
 static PACK_SOURCE_GENERATION: AtomicUsize = AtomicUsize::new(0);
 static PACK_SOURCE_IS_CHINA: AtomicBool = AtomicBool::new(false);
@@ -211,7 +215,7 @@ fn pack_download_url(config_state: &Mutex<Config>, path: &str) -> String {
 }
 
 fn is_pack_source_switch_error(error: &str) -> bool {
-    error.contains("下载源已切换")
+    error.contains(DOWNLOAD_SOURCE_SWITCHED_MESSAGE)
 }
 
 async fn monitor_download_speed(
@@ -471,7 +475,7 @@ pub async fn sync_versions(
     if !download_queue.is_empty() {
         let total = download_queue.len();
         let counter = Arc::new(AtomicUsize::new(0));
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(5)); // 限制并发数
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(8)); // 限制并发数
         let client_arc = client.inner();
         let config_state_ref = config_state.inner();
         let downloaded_bytes = Arc::new(AtomicUsize::new(0));
@@ -2057,6 +2061,564 @@ fn extract_native_jar(jar_path: &Path, natives_dir: &Path) -> Result<(), String>
     Ok(())
 }
 
+fn pack_source_switch_error() -> String {
+    DOWNLOAD_SOURCE_SWITCHED_MESSAGE.to_string()
+}
+
+async fn ensure_pack_source_current(
+    source_generation: usize,
+    cleanup_path: &Path,
+) -> Result<(), String> {
+    if PACK_SOURCE_GENERATION.load(Ordering::SeqCst) != source_generation {
+        let _ = fs::remove_file(cleanup_path).await;
+        return Err(pack_source_switch_error());
+    }
+
+    Ok(())
+}
+
+fn part_tmp_path(tmp_path: &Path, index: usize) -> PathBuf {
+    let mut part_path = tmp_path.as_os_str().to_os_string();
+    part_path.push(format!(".part{}", index));
+    PathBuf::from(part_path)
+}
+
+fn parallel_part_count(total_size: u64) -> usize {
+    if total_size < SINGLE_FILE_PARALLEL_THRESHOLD_BYTES {
+        return 1;
+    }
+
+    let by_chunk = (total_size.div_ceil(SINGLE_FILE_PARALLEL_CHUNK_BYTES))
+        .min(SINGLE_FILE_PARALLEL_PARTS as u64);
+    by_chunk.max(2) as usize
+}
+
+fn split_download_ranges(total_size: u64, part_count: usize) -> Vec<(usize, u64, u64)> {
+    if total_size == 0 || part_count == 0 {
+        return Vec::new();
+    }
+
+    let part_size = total_size.div_ceil(part_count as u64);
+    let mut ranges = Vec::with_capacity(part_count);
+    let mut start = 0u64;
+
+    for index in 0..part_count {
+        if start >= total_size {
+            break;
+        }
+
+        let end = (start + part_size - 1).min(total_size - 1);
+        ranges.push((index, start, end));
+        start = end + 1;
+    }
+
+    ranges
+}
+
+fn parse_content_range_total(response: &reqwest::Response) -> Option<u64> {
+    let content_range = response.headers().get(CONTENT_RANGE)?.to_str().ok()?.trim();
+    let (_, total) = content_range.rsplit_once('/')?;
+    if total == "*" {
+        return None;
+    }
+
+    total.parse::<u64>().ok()
+}
+
+async fn probe_parallel_download_size(client: &Client, url: &str) -> Option<u64> {
+    let response = client
+        .get(url)
+        .header(RANGE, "bytes=0-0")
+        .send()
+        .await
+        .ok()?;
+
+    if response.status() != StatusCode::PARTIAL_CONTENT {
+        return None;
+    }
+
+    parse_content_range_total(&response).filter(|size| *size > 0)
+}
+
+async fn probe_pack_parallel_download_size(
+    client: &Client,
+    url: &str,
+    source_generation: usize,
+    tmp_path: &Path,
+) -> Result<Option<u64>, String> {
+    ensure_pack_source_current(source_generation, tmp_path).await?;
+
+    let source_switched = PACK_SOURCE_SWITCH_NOTIFY.notified();
+    tokio::pin!(source_switched);
+    ensure_pack_source_current(source_generation, tmp_path).await?;
+
+    let response = tokio::select! {
+        _ = &mut source_switched => {
+            let _ = fs::remove_file(tmp_path).await;
+            return Err(pack_source_switch_error());
+        }
+        result = client.get(url).header(RANGE, "bytes=0-0").send() => match result {
+            Ok(response) => response,
+            Err(_) => return Ok(None),
+        },
+    };
+
+    ensure_pack_source_current(source_generation, tmp_path).await?;
+
+    if response.status() != StatusCode::PARTIAL_CONTENT {
+        return Ok(None);
+    }
+
+    Ok(parse_content_range_total(&response).filter(|size| *size > 0))
+}
+
+async fn cleanup_parallel_temp_files(tmp_path: &Path, part_count: usize) {
+    let _ = fs::remove_file(tmp_path).await;
+    for index in 0..part_count {
+        let _ = fs::remove_file(part_tmp_path(tmp_path, index)).await;
+    }
+}
+
+async fn cleanup_part_files(part_paths: &[PathBuf]) {
+    for part_path in part_paths {
+        let _ = fs::remove_file(part_path).await;
+    }
+}
+
+async fn merge_download_parts(
+    tmp_path: &Path,
+    dest: &Path,
+    url: &str,
+    part_paths: &[PathBuf],
+    expected_hash: Option<&str>,
+) -> Result<(), String> {
+    let result = async {
+        let mut output = File::create(tmp_path).await.map_err(|e| e.to_string())?;
+        let mut hasher = Sha1::new();
+        let mut buffer = [0u8; 64 * 1024];
+
+        for part_path in part_paths {
+            let mut part = File::open(part_path).await.map_err(|e| e.to_string())?;
+            loop {
+                let n = part.read(&mut buffer).await.map_err(|e| e.to_string())?;
+                if n == 0 {
+                    break;
+                }
+
+                hasher.update(&buffer[..n]);
+                output
+                    .write_all(&buffer[..n])
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+
+        output.flush().await.map_err(|e| e.to_string())?;
+        drop(output);
+
+        let actual_hash = hex::encode(hasher.finalize());
+        if expected_hash.is_some_and(|hash| actual_hash != hash) {
+            return Err(format!("{} -> Hash 校验失败，文件可能损坏", url));
+        }
+
+        fs::rename(tmp_path, dest)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok::<(), String>(())
+    }
+    .await;
+
+    cleanup_part_files(part_paths).await;
+    if result.is_err() {
+        let _ = fs::remove_file(tmp_path).await;
+    }
+
+    result
+}
+
+async fn download_range_part(
+    client: Client,
+    url: String,
+    part_path: PathBuf,
+    index: usize,
+    start: u64,
+    end: u64,
+    downloaded_bytes: Option<Arc<AtomicUsize>>,
+) -> Result<(usize, PathBuf), String> {
+    let result = async {
+        let response = client
+            .get(&url)
+            .header(RANGE, format!("bytes={}-{}", start, end))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if response.status() != StatusCode::PARTIAL_CONTENT {
+            return Err(format!(
+                "{} -> HTTP {} for range {}-{}",
+                url,
+                response.status(),
+                start,
+                end
+            ));
+        }
+
+        let mut file = File::create(&part_path).await.map_err(|e| e.to_string())?;
+        let mut stream = response.bytes_stream();
+        let expected_len = end - start + 1;
+        let mut written = 0u64;
+
+        while let Some(item) = stream.next().await {
+            let chunk = item.map_err(|e| e.to_string())?;
+            file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+            written += chunk.len() as u64;
+            if let Some(downloaded_bytes) = &downloaded_bytes {
+                downloaded_bytes.fetch_add(chunk.len(), Ordering::SeqCst);
+            }
+        }
+
+        file.flush().await.map_err(|e| e.to_string())?;
+        drop(file);
+
+        if written != expected_len {
+            return Err(format!(
+                "{} -> Range {}-{} 大小不匹配，期望 {} bytes，实际 {} bytes",
+                url, start, end, expected_len, written
+            ));
+        }
+
+        Ok::<(), String>(())
+    }
+    .await;
+
+    if let Err(error) = result {
+        let _ = fs::remove_file(&part_path).await;
+        return Err(error);
+    }
+
+    Ok((index, part_path))
+}
+
+async fn download_pack_range_part(
+    client: Client,
+    url: String,
+    part_path: PathBuf,
+    index: usize,
+    start: u64,
+    end: u64,
+    source_generation: usize,
+    downloaded_bytes: Arc<AtomicUsize>,
+) -> Result<(usize, PathBuf), String> {
+    let result = async {
+        ensure_pack_source_current(source_generation, &part_path).await?;
+
+        let source_switched = PACK_SOURCE_SWITCH_NOTIFY.notified();
+        tokio::pin!(source_switched);
+        ensure_pack_source_current(source_generation, &part_path).await?;
+
+        let response = tokio::select! {
+            _ = &mut source_switched => {
+                let _ = fs::remove_file(&part_path).await;
+                return Err(pack_source_switch_error());
+            }
+            result = client.get(&url).header(RANGE, format!("bytes={}-{}", start, end)).send() => {
+                result.map_err(|e| e.to_string())?
+            }
+        };
+
+        if response.status() != StatusCode::PARTIAL_CONTENT {
+            return Err(format!(
+                "{} -> HTTP {} for range {}-{}",
+                url,
+                response.status(),
+                start,
+                end
+            ));
+        }
+
+        let mut file = File::create(&part_path).await.map_err(|e| e.to_string())?;
+        let mut stream = response.bytes_stream();
+        let expected_len = end - start + 1;
+        let mut written = 0u64;
+
+        loop {
+            ensure_pack_source_current(source_generation, &part_path).await?;
+
+            let Some(item) = (tokio::select! {
+                _ = &mut source_switched => {
+                    let _ = fs::remove_file(&part_path).await;
+                    return Err(pack_source_switch_error());
+                }
+                item = stream.next() => item,
+            }) else {
+                break;
+            };
+
+            let chunk = item.map_err(|e| e.to_string())?;
+            file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+            written += chunk.len() as u64;
+            downloaded_bytes.fetch_add(chunk.len(), Ordering::SeqCst);
+        }
+
+        file.flush().await.map_err(|e| e.to_string())?;
+        drop(file);
+
+        if written != expected_len {
+            return Err(format!(
+                "{} -> Range {}-{} 大小不匹配，期望 {} bytes，实际 {} bytes",
+                url, start, end, expected_len, written
+            ));
+        }
+
+        Ok::<(), String>(())
+    }
+    .await;
+
+    if let Err(error) = result {
+        let _ = fs::remove_file(&part_path).await;
+        return Err(error);
+    }
+
+    Ok((index, part_path))
+}
+
+async fn collect_downloaded_parts(
+    results: Vec<Result<(usize, PathBuf), String>>,
+    part_count: usize,
+    tmp_path: &Path,
+) -> Result<Vec<PathBuf>, String> {
+    let mut part_paths = vec![None; part_count];
+    let mut first_error = None;
+
+    for result in results {
+        match result {
+            Ok((index, part_path)) if index < part_count => {
+                part_paths[index] = Some(part_path);
+            }
+            Ok((index, part_path)) => {
+                let _ = fs::remove_file(part_path).await;
+                if first_error.is_none() {
+                    first_error = Some(format!("分片索引越界: {}", index));
+                }
+            }
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+
+    if let Some(error) = first_error {
+        cleanup_parallel_temp_files(tmp_path, part_count).await;
+        return Err(error);
+    }
+
+    match part_paths.into_iter().collect::<Option<Vec<_>>>() {
+        Some(part_paths) => Ok(part_paths),
+        None => {
+            cleanup_parallel_temp_files(tmp_path, part_count).await;
+            Err("分片下载结果不完整".to_string())
+        }
+    }
+}
+
+async fn download_file_parallel(
+    client: &Client,
+    url: &str,
+    dest: &Path,
+    tmp_path: &Path,
+    total_size: u64,
+    expected_hash: Option<&str>,
+    downloaded_bytes: Option<Arc<AtomicUsize>>,
+) -> Result<(), String> {
+    let part_count = parallel_part_count(total_size);
+    if part_count <= 1 {
+        return Err("文件小于分片下载阈值".to_string());
+    }
+
+    let ranges = split_download_ranges(total_size, part_count);
+    let part_count = ranges.len();
+    cleanup_parallel_temp_files(tmp_path, part_count).await;
+
+    let client = client.clone();
+    let url = url.to_string();
+    let fetches = futures::stream::iter(ranges.into_iter().map(|(index, start, end)| {
+        let client = client.clone();
+        let url = url.clone();
+        let part_path = part_tmp_path(tmp_path, index);
+        let downloaded_bytes = downloaded_bytes.clone();
+
+        async move {
+            download_range_part(client, url, part_path, index, start, end, downloaded_bytes).await
+        }
+    }))
+    .buffer_unordered(part_count);
+
+    let results: Vec<_> = fetches.collect().await;
+    let part_paths = collect_downloaded_parts(results, part_count, tmp_path).await?;
+    merge_download_parts(tmp_path, dest, &url, &part_paths, expected_hash).await
+}
+
+async fn download_pack_file_parallel(
+    client: &Client,
+    url: &str,
+    dest: &Path,
+    tmp_path: &Path,
+    total_size: u64,
+    expected_hash: Option<&str>,
+    source_generation: usize,
+    downloaded_bytes: &Arc<AtomicUsize>,
+) -> Result<(), String> {
+    let part_count = parallel_part_count(total_size);
+    if part_count <= 1 {
+        return Err("文件小于分片下载阈值".to_string());
+    }
+
+    let ranges = split_download_ranges(total_size, part_count);
+    let part_count = ranges.len();
+    cleanup_parallel_temp_files(tmp_path, part_count).await;
+    ensure_pack_source_current(source_generation, tmp_path).await?;
+
+    let client = client.clone();
+    let url = url.to_string();
+    let downloaded_bytes = downloaded_bytes.clone();
+    let fetches = futures::stream::iter(ranges.into_iter().map(|(index, start, end)| {
+        let client = client.clone();
+        let url = url.clone();
+        let part_path = part_tmp_path(tmp_path, index);
+        let downloaded_bytes = downloaded_bytes.clone();
+
+        async move {
+            download_pack_range_part(
+                client,
+                url,
+                part_path,
+                index,
+                start,
+                end,
+                source_generation,
+                downloaded_bytes,
+            )
+            .await
+        }
+    }))
+    .buffer_unordered(part_count);
+
+    let results: Vec<_> = fetches.collect().await;
+    let part_paths = collect_downloaded_parts(results, part_count, tmp_path).await?;
+    if let Err(error) = ensure_pack_source_current(source_generation, tmp_path).await {
+        cleanup_part_files(&part_paths).await;
+        return Err(error);
+    }
+    merge_download_parts(tmp_path, dest, &url, &part_paths, expected_hash).await
+}
+
+async fn download_file_single_stream(
+    client: &Client,
+    url: &str,
+    dest: &Path,
+    tmp_path: &Path,
+    expected_hash: Option<&str>,
+    downloaded_bytes: Option<&Arc<AtomicUsize>>,
+) -> Result<(), String> {
+    let response = client.get(url).send().await.map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("{} -> HTTP {}", url, response.status()));
+    }
+
+    let mut file = File::create(tmp_path).await.map_err(|e| e.to_string())?;
+    let mut hasher = Sha1::new();
+    let mut stream = response.bytes_stream();
+
+    while let Some(item) = stream.next().await {
+        let chunk = item.map_err(|e| e.to_string())?;
+        hasher.update(&chunk);
+        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+        if let Some(downloaded_bytes) = downloaded_bytes {
+            downloaded_bytes.fetch_add(chunk.len(), Ordering::SeqCst);
+        }
+    }
+
+    file.flush().await.map_err(|e| e.to_string())?;
+    drop(file);
+
+    let actual_hash = hex::encode(hasher.finalize());
+    if expected_hash.is_some_and(|hash| actual_hash != hash) {
+        let _ = fs::remove_file(tmp_path).await;
+        return Err(format!("{} -> Hash 校验失败，文件可能损坏", url));
+    }
+
+    fs::rename(tmp_path, dest)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+async fn download_pack_file_single_stream(
+    client: &Client,
+    url: &str,
+    dest: &Path,
+    tmp_path: &Path,
+    expected_hash: Option<&str>,
+    source_generation: usize,
+    downloaded_bytes: &Arc<AtomicUsize>,
+) -> Result<(), String> {
+    ensure_pack_source_current(source_generation, tmp_path).await?;
+
+    let source_switched = PACK_SOURCE_SWITCH_NOTIFY.notified();
+    tokio::pin!(source_switched);
+    ensure_pack_source_current(source_generation, tmp_path).await?;
+
+    let response = tokio::select! {
+        _ = &mut source_switched => {
+            let _ = fs::remove_file(tmp_path).await;
+            return Err(pack_source_switch_error());
+        }
+        result = client.get(url).send() => result.map_err(|e| e.to_string())?,
+    };
+    if !response.status().is_success() {
+        return Err(format!("{} -> HTTP {}", url, response.status()));
+    }
+
+    let mut file = File::create(tmp_path).await.map_err(|e| e.to_string())?;
+    let mut hasher = Sha1::new();
+    let mut stream = response.bytes_stream();
+
+    loop {
+        ensure_pack_source_current(source_generation, tmp_path).await?;
+
+        let Some(item) = (tokio::select! {
+            _ = &mut source_switched => {
+                let _ = fs::remove_file(tmp_path).await;
+                return Err(pack_source_switch_error());
+            }
+            item = stream.next() => item,
+        }) else {
+            break;
+        };
+
+        let chunk = item.map_err(|e| e.to_string())?;
+        hasher.update(&chunk);
+        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+        downloaded_bytes.fetch_add(chunk.len(), Ordering::SeqCst);
+    }
+
+    file.flush().await.map_err(|e| e.to_string())?;
+    drop(file);
+
+    let actual_hash = hex::encode(hasher.finalize());
+    if expected_hash.is_some_and(|hash| actual_hash != hash) {
+        let _ = fs::remove_file(tmp_path).await;
+        return Err(format!("{} -> Hash 校验失败，文件可能损坏", url));
+    }
+
+    fs::rename(tmp_path, dest)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 async fn download_file_streamed(
     client: &Client,
     url: &str,
@@ -2070,37 +2632,41 @@ async fn download_file_streamed(
             .map_err(|e| e.to_string())?;
     }
 
-    let resp = client.get(url).send().await.map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("{} -> HTTP {}", url, resp.status()));
-    }
-
     let tmp_path = dest.with_extension("tmp");
-    let mut file = File::create(&tmp_path).await.map_err(|e| e.to_string())?;
-    let mut hasher = Sha1::new();
-    let mut stream = resp.bytes_stream();
-
-    while let Some(item) = stream.next().await {
-        let chunk = item.map_err(|e| e.to_string())?;
-        hasher.update(&chunk);
-        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
-        if let Some(downloaded_bytes) = downloaded_bytes {
-            downloaded_bytes.fetch_add(chunk.len(), Ordering::SeqCst);
+    if let Some(total_size) = probe_parallel_download_size(client, url).await {
+        if parallel_part_count(total_size) > 1 {
+            match download_file_parallel(
+                client,
+                url,
+                dest,
+                &tmp_path,
+                total_size,
+                expected_hash,
+                downloaded_bytes.cloned(),
+            )
+            .await
+            {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    println!(
+                        "[updater] single-file parallel download fallback: {} ({})",
+                        dest.display(),
+                        error
+                    );
+                }
+            }
         }
     }
 
-    file.flush().await.map_err(|e| e.to_string())?;
-
-    let actual_hash = hex::encode(hasher.finalize());
-    if expected_hash.is_some_and(|hash| actual_hash != hash) {
-        let _ = fs::remove_file(&tmp_path).await;
-        return Err(format!("{} -> Hash 校验失败，文件可能损坏", url));
-    }
-
-    fs::rename(tmp_path, dest)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    download_file_single_stream(
+        client,
+        url,
+        dest,
+        &tmp_path,
+        expected_hash,
+        downloaded_bytes,
+    )
+    .await
 }
 
 async fn download_pack_file_streamed(
@@ -2118,67 +2684,47 @@ async fn download_pack_file_streamed(
     }
 
     let tmp_path = dest.with_extension("tmp");
-    if PACK_SOURCE_GENERATION.load(Ordering::SeqCst) != source_generation {
-        let _ = fs::remove_file(&tmp_path).await;
-        return Err("下载源已切换，正在重试".to_string());
-    }
+    ensure_pack_source_current(source_generation, &tmp_path).await?;
 
-    let source_switched = PACK_SOURCE_SWITCH_NOTIFY.notified();
-    tokio::pin!(source_switched);
-    if PACK_SOURCE_GENERATION.load(Ordering::SeqCst) != source_generation {
-        let _ = fs::remove_file(&tmp_path).await;
-        return Err("下载源已切换，正在重试".to_string());
-    }
-
-    let resp = tokio::select! {
-        _ = &mut source_switched => {
-            let _ = fs::remove_file(&tmp_path).await;
-            return Err("下载源已切换，正在重试".to_string());
-        }
-        result = client.get(url).send() => result.map_err(|e| e.to_string())?,
-    };
-    if !resp.status().is_success() {
-        return Err(format!("{} -> HTTP {}", url, resp.status()));
-    }
-
-    let mut file = File::create(&tmp_path).await.map_err(|e| e.to_string())?;
-    let mut hasher = Sha1::new();
-    let mut stream = resp.bytes_stream();
-
-    loop {
-        if PACK_SOURCE_GENERATION.load(Ordering::SeqCst) != source_generation {
-            let _ = fs::remove_file(&tmp_path).await;
-            return Err("下载源已切换，正在重试".to_string());
-        }
-
-        let Some(item) = (tokio::select! {
-            _ = &mut source_switched => {
-                let _ = fs::remove_file(&tmp_path).await;
-                return Err("下载源已切换，正在重试".to_string());
+    if let Some(total_size) =
+        probe_pack_parallel_download_size(client, url, source_generation, &tmp_path).await?
+    {
+        if parallel_part_count(total_size) > 1 {
+            match download_pack_file_parallel(
+                client,
+                url,
+                dest,
+                &tmp_path,
+                total_size,
+                expected_hash,
+                source_generation,
+                downloaded_bytes,
+            )
+            .await
+            {
+                Ok(()) => return Ok(()),
+                Err(error) if is_pack_source_switch_error(&error) => return Err(error),
+                Err(error) => {
+                    println!(
+                        "[updater] pack parallel download fallback: {} ({})",
+                        dest.display(),
+                        error
+                    );
+                }
             }
-            item = stream.next() => item,
-        }) else {
-            break;
-        };
-
-        let chunk = item.map_err(|e| e.to_string())?;
-        hasher.update(&chunk);
-        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
-        downloaded_bytes.fetch_add(chunk.len(), Ordering::SeqCst);
+        }
     }
 
-    file.flush().await.map_err(|e| e.to_string())?;
-
-    let actual_hash = hex::encode(hasher.finalize());
-    if expected_hash.is_some_and(|hash| actual_hash != hash) {
-        let _ = fs::remove_file(&tmp_path).await;
-        return Err(format!("{} -> Hash 校验失败，文件可能损坏", url));
-    }
-
-    fs::rename(tmp_path, dest)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    download_pack_file_single_stream(
+        client,
+        url,
+        dest,
+        &tmp_path,
+        expected_hash,
+        source_generation,
+        downloaded_bytes,
+    )
+    .await
 }
 
 async fn calculate_sha1(path: &Path) -> tokio::io::Result<String> {

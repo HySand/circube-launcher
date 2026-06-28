@@ -31,6 +31,11 @@ const currentSpeedText = ref("0KB/s");
 const downloadProgress = ref<{ current: number; total: number; label: string } | null>(null);
 let unlisten: UnlistenFn;
 let unlistenSpeed: UnlistenFn;
+const SPEED_SMOOTHING_ALPHA = 0.35;
+const SPEED_ZERO_HOLD_MS = 2500;
+let displayedSpeedBytesPerSec = 0;
+let lastActiveSpeedBytesPerSec = 0;
+let lastActiveSpeedAt = 0;
 
 const fetchQuote = async () => {
   const response = await fetch("https://v1.hitokoto.cn/?c=d")
@@ -53,10 +58,47 @@ const formatSpeed = (bytesPerSec: number) => {
   return `${Math.max(0, Math.round(bytesPerSec / 1024))}KB/s`
 }
 
+const resetSpeedState = () => {
+  displayedSpeedBytesPerSec = 0
+  lastActiveSpeedBytesPerSec = 0
+  lastActiveSpeedAt = 0
+  currentSpeedText.value = "0KB/s"
+}
+
+const updateSmoothSpeed = ({ currentBytesPerSec, averageBytesPerSec }: DownloadSpeedPayload) => {
+  const now = Date.now()
+  let sample = currentBytesPerSec
+
+  if (sample > 0) {
+    lastActiveSpeedBytesPerSec = sample
+    lastActiveSpeedAt = now
+  } else if (lastActiveSpeedBytesPerSec > 0 && now - lastActiveSpeedAt <= SPEED_ZERO_HOLD_MS) {
+    sample = lastActiveSpeedBytesPerSec
+  } else {
+    sample = averageBytesPerSec
+  }
+
+  if (sample <= 0) {
+    displayedSpeedBytesPerSec = 0
+  } else if (displayedSpeedBytesPerSec <= 0) {
+    displayedSpeedBytesPerSec = sample
+  } else {
+    displayedSpeedBytesPerSec =
+      displayedSpeedBytesPerSec * (1 - SPEED_SMOOTHING_ALPHA) + sample * SPEED_SMOOTHING_ALPHA
+  }
+
+  currentSpeedText.value = formatSpeed(displayedSpeedBytesPerSec)
+}
+
+const formatProgressPercent = (current: number, total: number) => {
+  if (total <= 0) return "0%"
+  return `${Math.min(100, Math.max(0, Math.round((current / total) * 100)))}%`
+}
+
 const updateDownloadStatusText = () => {
   if (!downloadProgress.value) return
   const { current, total, label } = downloadProgress.value
-  statusText.value = `正在更新${label} ${current}/${total} (${currentSpeedText.value})`
+  statusText.value = `正在更新${label} ${formatProgressPercent(current, total)} (${currentSpeedText.value})`
 }
 
 const switchToChinaCdn = async () => {
@@ -91,9 +133,6 @@ onMounted(async () => {
         const progressFile = event.payload.file ?? "";
         const isNamedResource = /^(Minecraft|NeoForge|Forge)\b/i.test(progressFile);
         const label = isNamedResource ? progressFile : "整合包资源";
-        if (downloadProgress.value?.label !== label) {
-          currentSpeedText.value = "0KB/s";
-        }
         if (isNamedResource) {
           showSwitchCdnButton.value = false;
         }
@@ -101,6 +140,7 @@ onMounted(async () => {
         updateDownloadStatusText();
       } else {
         downloadProgress.value = null;
+        resetSpeedState();
         statusText.value = event.payload.file && event.payload.file !== "/"
           ? event.payload.file
           : "检测到新版本，正在更新...";
@@ -110,7 +150,7 @@ onMounted(async () => {
   unlistenSpeed = await listen<DownloadSpeedPayload>(
     'download-speed',
     (event) => {
-      currentSpeedText.value = formatSpeed(event.payload.currentBytesPerSec)
+      updateSmoothSpeed(event.payload)
       updateDownloadStatusText()
       showSwitchCdnButton.value =
         event.payload.lowSpeed
