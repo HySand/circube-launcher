@@ -44,13 +44,13 @@ const fetchQuote = async () => {
 }
 
 interface UserInfo { uuid: string; name: string; accessToken: string; skinUrl: string; authType: string }
-interface Config { javaPath: string; maxMemory: number; downloadSource: 'overseas' | 'chinaCdn' }
+interface Config { javaPath: string; maxMemory: number; downloadSource: 'r2' | 'bitiful' }
 interface JavaInfo { path: string; version: string }
 interface DownloadSpeedPayload {
   averageBytesPerSec: number;
   currentBytesPerSec: number;
   lowSpeed: boolean;
-  source: 'overseas' | 'chinaCdn';
+  source: 'r2' | 'bitiful';
 }
 
 const formatSpeed = (bytesPerSec: number) => {
@@ -154,8 +154,8 @@ onMounted(async () => {
       updateDownloadStatusText()
       showSwitchCdnButton.value =
         event.payload.lowSpeed
-        && event.payload.source !== 'chinaCdn'
-        && cache.settings.downloadSource !== 'chinaCdn'
+        && event.payload.source !== 'bitiful'
+        && cache.settings.downloadSource !== 'bitiful'
     }
   );
 

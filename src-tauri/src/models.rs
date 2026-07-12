@@ -29,21 +29,23 @@ pub struct Config {
 #[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum DownloadSource {
-    Overseas,
-    ChinaCdn,
+    #[serde(rename = "r2", alias = "overseas")]
+    R2,
+    #[serde(rename = "bitiful", alias = "chinaCdn")]
+    Bitiful,
 }
 
 impl Default for DownloadSource {
     fn default() -> Self {
-        Self::Overseas
+        Self::R2
     }
 }
 
 impl DownloadSource {
     pub fn base_url(self) -> &'static str {
         match self {
-            Self::Overseas => "https://drive.996154.xyz/public/updater/.minecraft/",
-            Self::ChinaCdn => "https://pan.996154.xyz/public/updater/.minecraft/",
+            Self::R2 => "https://drive.atmospherium.space/public/updater/.minecraft/",
+            Self::Bitiful => "https://circube.s3.bitiful.net/public/updater/.minecraft/",
         }
     }
 }

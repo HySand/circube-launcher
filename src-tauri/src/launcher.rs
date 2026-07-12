@@ -15,6 +15,24 @@ use tauri::{AppHandle, Emitter, State};
 use std::os::windows::process::CommandExt;
 
 const LAUNCHER_VERSION: &str = env!("CARGO_PKG_VERSION");
+const MEMORY_RESERVE_MB: u64 = 512;
+const MEMORY_STEP_MB: u64 = 512;
+const MEMORY_MIN_MB: u64 = 2048;
+const MEMORY_BASELINE_MAX_MB: u64 = 6144;
+
+fn align_memory_down(memory_mb: u64) -> u64 {
+    memory_mb / MEMORY_STEP_MB * MEMORY_STEP_MB
+}
+
+fn auto_memory_recommendation_mb(available_mb: u64) -> u64 {
+    let target_mb = if available_mb <= MEMORY_BASELINE_MAX_MB {
+        available_mb
+    } else {
+        std::cmp::max(MEMORY_BASELINE_MAX_MB, available_mb.saturating_mul(3) / 4)
+    };
+
+    std::cmp::max(MEMORY_MIN_MB, align_memory_down(target_mb))
+}
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct VersionConfig {
@@ -427,9 +445,8 @@ pub async fn launch_minecraft(
         sys.refresh_memory();
         let total_mb = sys.total_memory() / 1024 / 1024;
         let used_mb = sys.used_memory() / 1024 / 1024;
-        let available = total_mb.saturating_sub(used_mb).saturating_sub(512);
-        let recommendation = ((available as f64 * 0.75) / 512.0).floor() as u64 * 512;
-        final_max_memory = std::cmp::max(2048, recommendation);
+        let available = total_mb.saturating_sub(used_mb).saturating_sub(MEMORY_RESERVE_MB);
+        final_max_memory = auto_memory_recommendation_mb(available);
     }
 
     let mut final_args: Vec<String> = Vec::new();

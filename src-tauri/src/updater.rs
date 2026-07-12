@@ -24,7 +24,9 @@ use walkdir::WalkDir;
 use std::os::windows::process::CommandExt;
 
 const REMOTE_MANIFEST_URL: &str = "https://gitee.com/hysand/CirCube/raw/main/manifest.json";
-const BMCLAPI_BASE_URL: &str = "https://bmclapi2.bangbang93.com";
+const BMCLAPI_BASE_URL: &str = "https://mirror.sjtu.edu.cn/bmclapi";
+//https://bmclapi2.bangbang93.com
+//https://mirror.sjtu.edu.cn/bmclapi
 const PACK_LOW_SPEED_WINDOW_SECS: u64 = 10;
 const PACK_LOW_SPEED_THRESHOLD_BYTES: u64 = 500_000;
 const SINGLE_FILE_PARALLEL_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
@@ -33,7 +35,7 @@ const SINGLE_FILE_PARALLEL_PARTS: usize = 4;
 const DOWNLOAD_SOURCE_SWITCHED_MESSAGE: &str = "下载源已切换，正在重试";
 
 static PACK_SOURCE_GENERATION: AtomicUsize = AtomicUsize::new(0);
-static PACK_SOURCE_IS_CHINA: AtomicBool = AtomicBool::new(false);
+static PACK_SOURCE_IS_BITIFUL: AtomicBool = AtomicBool::new(false);
 static PACK_SOURCE_SWITCH_NOTIFY: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
 #[derive(Deserialize)]
@@ -275,10 +277,10 @@ async fn monitor_download_speed(
             {
                 low_speed_latched = true;
             }
-            let source = if PACK_SOURCE_IS_CHINA.load(Ordering::SeqCst) {
-                DownloadSource::ChinaCdn
+            let source = if PACK_SOURCE_IS_BITIFUL.load(Ordering::SeqCst) {
+                DownloadSource::Bitiful
             } else {
-                DownloadSource::Overseas
+                DownloadSource::R2
             };
 
             let _ = app_handle.emit(
@@ -340,9 +342,9 @@ pub fn switch_to_china_cdn(
     config_state: tauri::State<'_, Mutex<Config>>,
 ) -> Result<Config, String> {
     let mut config = config_state.lock().unwrap();
-    config.download_source = DownloadSource::ChinaCdn;
+    config.download_source = DownloadSource::Bitiful;
     config.save().map_err(|e| e.to_string())?;
-    PACK_SOURCE_IS_CHINA.store(true, Ordering::SeqCst);
+    PACK_SOURCE_IS_BITIFUL.store(true, Ordering::SeqCst);
     PACK_SOURCE_GENERATION.fetch_add(1, Ordering::SeqCst);
     PACK_SOURCE_SWITCH_NOTIFY.notify_waiters();
     Ok(config.clone())
@@ -366,8 +368,8 @@ pub async fn sync_versions(
     let local_manifest_path = launcher_dir.join("manifest.json");
     let java_path = {
         let config = config_state.lock().unwrap();
-        PACK_SOURCE_IS_CHINA.store(
-            config.download_source == DownloadSource::ChinaCdn,
+        PACK_SOURCE_IS_BITIFUL.store(
+            config.download_source == DownloadSource::Bitiful,
             Ordering::SeqCst,
         );
         if config.java_path.trim().is_empty() {

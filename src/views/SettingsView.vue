@@ -129,8 +129,8 @@
         </div>
 
         <div class="grid grid-cols-2 gap-4">
-          <button type="button" @click="handleDownloadSourceSelect('overseas')"
-                  :class="cn('min-w-0 rounded-[19px] border p-5 text-left transition-all active:scale-[0.98]', config.downloadSource === 'overseas' ? 'border-blue-200 bg-blue-50/70 text-blue-700 shadow-sm' : 'border-slate-100 bg-slate-50/50 text-slate-500 hover:bg-white hover:border-blue-100')">
+          <button type="button" @click="handleDownloadSourceSelect('r2')"
+                  :class="cn('min-w-0 rounded-[19px] border p-5 text-left transition-all active:scale-[0.98]', config.downloadSource === 'r2' ? 'border-blue-200 bg-blue-50/70 text-blue-700 shadow-sm' : 'border-slate-100 bg-slate-50/50 text-slate-500 hover:bg-white hover:border-blue-100')">
             <div class="flex min-w-0 items-center gap-2.5">
               <Globe2 :size="19" class="shrink-0" />
               <span class="truncate text-[13px] font-black">源站</span>
@@ -138,8 +138,8 @@
             <p class="mt-2.5 truncate text-[11px] font-mono opacity-60">推荐，部分地区无法使用</p>
           </button>
 
-          <button type="button" @click="handleDownloadSourceSelect('chinaCdn')"
-                  :class="cn('min-w-0 rounded-[19px] border p-5 text-left transition-all active:scale-[0.98]', config.downloadSource === 'chinaCdn' ? 'border-blue-200 bg-blue-50/70 text-blue-700 shadow-sm' : 'border-slate-100 bg-slate-50/50 text-slate-500 hover:bg-white hover:border-blue-100')">
+          <button type="button" @click="handleDownloadSourceSelect('bitiful')"
+                  :class="cn('min-w-0 rounded-[19px] border p-5 text-left transition-all active:scale-[0.98]', config.downloadSource === 'bitiful' ? 'border-blue-200 bg-blue-50/70 text-blue-700 shadow-sm' : 'border-slate-100 bg-slate-50/50 text-slate-500 hover:bg-white hover:border-blue-100')">
             <div class="flex min-w-0 items-center gap-2.5">
               <Cloud :size="19" class="shrink-0" />
               <span class="truncate text-[13px] font-black">CDN</span>
@@ -239,16 +239,29 @@ const isUpdatingPack = ref(false)
 const config = ref({
   javaPath: cache.settings?.javaPath || '',
   maxMemory: cache.settings?.maxMemory ?? 0,
-  downloadSource: cache.settings?.downloadSource ?? 'overseas'
+  downloadSource: cache.settings?.downloadSource ?? 'r2'
 })
 
 const totalSystemMem = ref(cache.totalMemory)
 const currentUsedMem = ref(4096)
 const javaDetailList = ref(cache.javaList)
 const sliderValue = ref([config.value.maxMemory])
+const MEMORY_RESERVE_MB = 512
+const MEMORY_STEP_MB = 512
+const MEMORY_MIN_MB = 2048
+const MEMORY_BASELINE_MAX_MB = 6144
+
+const alignMemoryDown = (memoryMb: number) => Math.floor(memoryMb / MEMORY_STEP_MB) * MEMORY_STEP_MB
+const autoMemoryRecommendation = (availableMb: number) => {
+  const targetMb = availableMb <= MEMORY_BASELINE_MAX_MB
+    ? availableMb
+    : Math.max(MEMORY_BASELINE_MAX_MB, Math.floor(availableMb * 0.75))
+
+  return Math.max(MEMORY_MIN_MB, alignMemoryDown(targetMb))
+}
 
 const selectedJava = computed(() => javaDetailList.value.find(j => j.path === config.value.javaPath))
-const maxSafeMemory = computed(() => Math.max(512, totalSystemMem.value - currentUsedMem.value - 512))
+const maxSafeMemory = computed(() => Math.max(MEMORY_STEP_MB, totalSystemMem.value - currentUsedMem.value - MEMORY_RESERVE_MB))
 const otherUsedPercent = computed(() => (currentUsedMem.value / totalSystemMem.value) * 100)
 const gamePercent = computed(() => (config.value.maxMemory / totalSystemMem.value) * 100)
 const freeMemAfterAlloc = computed(() => Math.max(0, totalSystemMem.value - currentUsedMem.value - config.value.maxMemory))
@@ -277,7 +290,8 @@ const performAutoTune = async () => {
   try {
     const used = await invoke<number>('get_used_memory')
     currentUsedMem.value = used
-    const recommendation = Math.max(2048, Math.floor((totalSystemMem.value - used - 512) * 0.75 / 512) * 512)
+    const available = Math.max(0, totalSystemMem.value - used - MEMORY_RESERVE_MB)
+    const recommendation = autoMemoryRecommendation(available)
     config.value.maxMemory = recommendation
     sliderValue.value = [recommendation]
     return recommendation
@@ -308,7 +322,7 @@ const handleDownloadSourceSelect = async (source: DownloadSource) => {
   if (config.value.downloadSource === source) return
   config.value.downloadSource = source
   await triggerSave()
-  toast.success(source === 'chinaCdn' ? "已切换至CDN" : "已切换至源站", { duration: 1500 })
+  toast.success(source === 'bitiful' ? "已切换至CDN" : "已切换至源站", { duration: 1500 })
 }
 
 const handleSliderChange = (val: number[] | undefined) => {

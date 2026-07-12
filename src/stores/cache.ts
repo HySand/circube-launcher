@@ -2,13 +2,13 @@
 import { defineStore } from 'pinia'
 
 interface JavaInfo { path: string; version: string }
-export type DownloadSource = 'overseas' | 'chinaCdn'
+export type DownloadSource = 'r2' | 'bitiful'
 export interface LauncherSettings { javaPath: string; maxMemory: number; downloadSource: DownloadSource }
 
 const defaultSettings = (): LauncherSettings => ({
     javaPath: '',
     maxMemory: 4096,
-    downloadSource: 'overseas',
+    downloadSource: 'r2',
 })
 
 export const useCacheStore = defineStore('cache', {
