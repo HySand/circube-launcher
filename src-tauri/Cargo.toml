@@ -16,7 +16,7 @@ serde_json = "1.0"
 chrono = { version = "0.4.44", default-features = false, features = ["clock", "std"] }
 reqwest = { version = "0.11", features = ["json", "stream"] }
 urlencoding = "2.1"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tauri-plugin-opener = "2.5.3"
 sysinfo = "0.30"
 dirs-next = "2.0"
@@ -30,8 +30,9 @@ walkdir = "2.5.0"
 flate2 = "1"
 
 [profile.release]
-opt-level = "s"    # 优化目标：考虑速度的同时优化大小
-lto = "fat"        # 启用最激进的链接时优化
-codegen-units = 1  # 减少代码生成单元数量，提高优化效果
-panic = "abort"    # 使用"abort"而非"unwind"处理恐慌
-strip = "symbols"  # 删除符号信息但保留必要的调试信息
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+incremental = false

@@ -55,7 +55,6 @@ fn main() {
         // follow the selected OpenBMCLAPI node instead of treating 302 as an
         // error; failed nodes are retried through the BMCLAPI entry point.
         .redirect(reqwest::redirect::Policy::limited(50))
-        .timeout(Duration::from_secs(300))
         .connect_timeout(Duration::from_secs(10))
         .pool_idle_timeout(Duration::from_secs(90))
         .pool_max_idle_per_host(64)

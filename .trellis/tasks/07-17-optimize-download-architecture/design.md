@@ -30,8 +30,8 @@ If the user requires a one-file change, retain these boundaries as private submo
 ## Download policy
 
 - `DownloadPolicy::Pack`: single stream only, existing source-generation cancellation semantics.
-- `DownloadPolicy::Resource`: Range eligible when trusted size is at least 8 MiB; use at most four pieces and a global request budget; completed pieces can be reused after transient failure.
-- A failed Range transfer falls back to a single stream for the same BMCLAPI URL before the job is considered failed.
+- `DownloadPolicy::Resource`: single stream only, with a global request budget across files.
+- Range is used only to resume an existing single-stream temporary file. Parallel pieces are forbidden for every source.
 
 ## Retry and error contract
 
