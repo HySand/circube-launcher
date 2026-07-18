@@ -7,6 +7,24 @@ const host = process.env.TAURI_DEV_HOST;
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [vue()],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          "vue-core": [
+            "vue",
+            "vue-router",
+            "pinia",
+            "pinia-plugin-persistedstate",
+            "@vueuse/core",
+          ],
+          "ui-vendor": ["reka-ui", "lucide-vue-next", "vue-sonner"],
+          "three-vendor": ["three"],
+          "skin-vendor": ["skinview3d", "skinview-utils"],
+        },
+      },
+    },
+  },
     resolve: {
         alias: {
             "@": fileURLToPath(new URL("./src", import.meta.url)),

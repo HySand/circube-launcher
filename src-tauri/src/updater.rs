@@ -1,9 +1,11 @@
+use crate::download_engine::{self, DownloadJob};
+use crate::download_sources::{asset_index_url, asset_object_url, library_urls, version_client_url};
 use crate::models::*;
 use chrono::{SecondsFormat, Utc};
 use flate2::read::DeflateDecoder;
-use futures::StreamExt;
-use reqwest::header::{CACHE_CONTROL, CONTENT_RANGE, PRAGMA, RANGE};
-use reqwest::{Client, StatusCode};
+use futures::{FutureExt, StreamExt};
+use reqwest::header::{CACHE_CONTROL, PRAGMA};
+use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
 use sha1::{Digest, Sha1};
@@ -16,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::Emitter;
 use tokio::fs::{self, File};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use urlencoding::encode;
 use walkdir::WalkDir;
 
@@ -24,19 +26,23 @@ use walkdir::WalkDir;
 use std::os::windows::process::CommandExt;
 
 const REMOTE_MANIFEST_URL: &str = "https://gitee.com/hysand/CirCube/raw/main/manifest.json";
-const BMCLAPI_BASE_URL: &str = "https://mirror.sjtu.edu.cn/bmclapi";
-//https://bmclapi2.bangbang93.com
-//https://mirror.sjtu.edu.cn/bmclapi
+const PACK_FILE_CONCURRENCY: usize = 24;
+const DOWNLOAD_REQUEST_CONCURRENCY: usize = 64;
 const PACK_LOW_SPEED_WINDOW_SECS: u64 = 10;
 const PACK_LOW_SPEED_THRESHOLD_BYTES: u64 = 500_000;
-const SINGLE_FILE_PARALLEL_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
-const SINGLE_FILE_PARALLEL_CHUNK_BYTES: u64 = 4 * 1024 * 1024;
-const SINGLE_FILE_PARALLEL_PARTS: usize = 4;
 const DOWNLOAD_SOURCE_SWITCHED_MESSAGE: &str = "下载源已切换，正在重试";
 
 static PACK_SOURCE_GENERATION: AtomicUsize = AtomicUsize::new(0);
 static PACK_SOURCE_IS_BITIFUL: AtomicBool = AtomicBool::new(false);
 static PACK_SOURCE_SWITCH_NOTIFY: tokio::sync::Notify = tokio::sync::Notify::const_new();
+static DOWNLOAD_REQUEST_SEMAPHORE: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::OnceLock::new();
+
+fn download_request_semaphore() -> Arc<tokio::sync::Semaphore> {
+    DOWNLOAD_REQUEST_SEMAPHORE
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(DOWNLOAD_REQUEST_CONCURRENCY)))
+        .clone()
+}
 
 #[derive(Deserialize)]
 struct MinecraftVersionMeta {
@@ -80,6 +86,7 @@ struct VersionDownloads {
 struct AssetIndexInfo {
     id: String,
     sha1: Option<String>,
+    size: Option<u64>,
     url: Option<String>,
 }
 
@@ -102,6 +109,7 @@ struct LibraryDownloadsInfo {
 struct DownloadInfo {
     path: Option<String>,
     sha1: Option<String>,
+    size: Option<u64>,
     url: Option<String>,
 }
 
@@ -124,20 +132,19 @@ struct AssetIndexJson {
 #[derive(Deserialize)]
 struct AssetObject {
     hash: String,
-}
-
-#[derive(Clone)]
-struct DownloadJob {
-    urls: Vec<String>,
-    dest: PathBuf,
-    sha1: Option<String>,
+    #[serde(default)]
+    size: u64,
 }
 
 struct PreparedAssets {
+    index_update: Option<AssetIndexUpdate>,
+    jobs: Vec<DownloadJob>,
+}
+
+struct AssetIndexUpdate {
     index_path: PathBuf,
     tmp_index_path: PathBuf,
     backup_index_path: Option<PathBuf>,
-    jobs: Vec<DownloadJob>,
 }
 
 #[derive(Clone, Copy)]
@@ -150,7 +157,6 @@ struct ModLoaderInstaller {
     kind: ModLoaderKind,
     version: String,
     artifact_path: String,
-    official_base_url: &'static str,
 }
 
 fn manifest_info(manifest: &Manifest) -> ManifestInfo {
@@ -184,6 +190,15 @@ fn manifest_file_path(path: &str) -> String {
         .or_else(|| normalized.strip_prefix("minecraft/"))
         .unwrap_or(&normalized)
         .to_string()
+}
+
+fn is_user_managed_pack_path(path: &str) -> bool {
+    let normalized = manifest_file_path(path);
+    let mut components = normalized.split('/');
+    let first = components.next().unwrap_or_default();
+
+    first.eq_ignore_ascii_case("config")
+        || (first.eq_ignore_ascii_case("options.txt") && components.next().is_none())
 }
 
 fn is_assets_index_path(path: &str) -> bool {
@@ -449,6 +464,14 @@ pub async fn sync_versions(
     let mut download_queue = Vec::new();
     for (rel_path, info) in &remote_manifest.files {
         let normalized_path = manifest_file_path(rel_path);
+        if is_user_managed_pack_path(&normalized_path) {
+            println!(
+                "[updater] skip user-managed pack path during update: {}",
+                normalized_path
+            );
+            continue;
+        }
+
         if is_assets_index_path(&normalized_path) {
             println!(
                 "[updater] skip manifest assets index marker during pack sync: {}",
@@ -462,14 +485,14 @@ pub async fn sync_versions(
         let file_needs_update = if !local_path.exists() {
             true
         } else {
-            match calculate_sha1(&local_path).await {
+            match download_engine::calculate_sha1(&local_path).await {
                 Ok(h) => h != info.hash,
                 Err(_) => true,
             }
         };
 
         if file_needs_update {
-            download_queue.push((normalized_path, info.hash.clone()));
+            download_queue.push((normalized_path, info.hash.clone(), info.size));
         }
     }
 
@@ -477,7 +500,7 @@ pub async fn sync_versions(
     if !download_queue.is_empty() {
         let total = download_queue.len();
         let counter = Arc::new(AtomicUsize::new(0));
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(8)); // 限制并发数
+        let request_semaphore = download_request_semaphore();
         let client_arc = client.inner();
         let config_state_ref = config_state.inner();
         let downloaded_bytes = Arc::new(AtomicUsize::new(0));
@@ -490,17 +513,16 @@ pub async fn sync_versions(
         ));
 
         let fetches =
-            futures::stream::iter(download_queue.into_iter().map(|(path, target_hash)| {
+            futures::stream::iter(download_queue.into_iter().map(|(path, target_hash, size)| {
                 let c = client_arc.clone();
                 let h = app_handle.clone();
                 let cnt = counter.clone();
-                let sem = semaphore.clone();
+                let request_semaphore = request_semaphore.clone();
                 let b_dir = base_dir.clone();
                 let config_state = config_state_ref;
                 let downloaded_bytes = downloaded_bytes.clone();
 
                 async move {
-                    let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                     let mut attempts = 0;
                     let max_retries = 3;
 
@@ -516,8 +538,10 @@ pub async fn sync_versions(
                             &url,
                             &dest,
                             Some(&target_hash),
+                            size,
                             source_generation,
                             &downloaded_bytes,
+                            &request_semaphore,
                         )
                         .await
                         {
@@ -544,8 +568,9 @@ pub async fn sync_versions(
                         }
                     }
                 }
+                .boxed()
             }))
-            .buffer_unordered(5);
+            .buffer_unordered(PACK_FILE_CONCURRENCY);
 
         let results: Vec<_> = fetches.collect().await;
         speed_monitor_stop.store(true, Ordering::SeqCst);
@@ -602,10 +627,6 @@ async fn ensure_minecraft_resources(
         serde_json::from_str(&raw_json).map_err(|e| format!("解析版本 JSON 失败: {}", e))?;
     emit_progress(app_handle, format!("{} 版本 JSON 已解析", version));
 
-    if !force_resource_install && asset_index_exists(mc_dir, &version_meta).await? {
-        return Ok(());
-    }
-
     ensure_client_jar(client, app_handle, &version_dir, version, &version_meta).await?;
 
     let _ = ensure_libraries(
@@ -618,16 +639,15 @@ async fn ensure_minecraft_resources(
     )
     .await?;
 
-    let prepared_assets = prepare_assets(client, mc_dir, &version_meta).await?;
+    let prepared_assets =
+        prepare_assets(client, mc_dir, &version_meta, force_resource_install).await?;
 
     if let Some(prepared_assets) = prepared_assets {
         let PreparedAssets {
-            index_path,
-            tmp_index_path,
-            backup_index_path,
+            index_update,
             jobs,
         } = prepared_assets;
-        let _ = run_download_jobs(
+        let _ = download_engine::run_jobs(
             client,
             app_handle,
             jobs,
@@ -638,12 +658,9 @@ async fn ensure_minecraft_resources(
         ensure_mod_loader_install_step(client, app_handle, mc_dir, version, &version_meta, java_path)
             .await?;
 
-        finish_assets_index(
-            index_path,
-            tmp_index_path,
-            backup_index_path,
-        )
-        .await?;
+        if let Some(index_update) = index_update {
+            finish_assets_index(index_update).await?;
+        }
     } else {
         ensure_mod_loader_install_step(client, app_handle, mc_dir, version, &version_meta, java_path)
             .await?;
@@ -670,15 +687,18 @@ async fn ensure_client_jar(
 
     emit_progress(app_handle, "正在检查 Minecraft client jar");
     let client_jar_path = version_dir.join(format!("{}.jar", version));
-    let url = client_download
+    let source_url = client_download
         .url
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| format!("版本 JSON 缺少 downloads.client.url: {}", version))?;
-    ensure_download_from_urls(
+    let urls = vec![version_client_url(source_url)?];
+    download_engine::ensure_download(
         client,
-        &[url.clone()],
+        &urls,
         &client_jar_path,
         client_download.sha1.as_deref(),
+        client_download.size,
+        None,
     )
     .await
 }
@@ -694,143 +714,6 @@ async fn ensure_mod_loader_install_step(
     emit_progress(app_handle, "正在检查 Forge/NeoForge 安装器");
     ensure_mod_loader_installer_outputs(client, app_handle, mc_dir, version, version_meta, java_path)
         .await
-}
-
-async fn ensure_download_from_urls(
-    client: &Client,
-    urls: &[String],
-    dest: &Path,
-    expected_hash: Option<&str>,
-) -> Result<(), String> {
-    ensure_download_from_urls_with_progress(client, urls, dest, expected_hash, None).await
-}
-
-async fn ensure_download_from_urls_with_progress(
-    client: &Client,
-    urls: &[String],
-    dest: &Path,
-    expected_hash: Option<&str>,
-    downloaded_bytes: Option<&Arc<AtomicUsize>>,
-) -> Result<(), String> {
-    if dest.exists() {
-        if let Some(expected_hash) = expected_hash {
-            if calculate_sha1(dest).await.ok().as_deref() == Some(expected_hash) {
-                return Ok(());
-            }
-        } else {
-            return Ok(());
-        }
-    }
-
-    let mut last_error = None;
-    for url in urls {
-        match download_file_streamed(client, url, dest, expected_hash, downloaded_bytes).await {
-            Ok(_) => return Ok(()),
-            Err(e) => last_error = Some(e),
-        }
-    }
-
-    Err(last_error.unwrap_or_else(|| format!("下载失败: {}", dest.display())))
-}
-
-async fn run_download_jobs(
-    client: &Client,
-    app_handle: &tauri::AppHandle,
-    jobs: Vec<DownloadJob>,
-    label: &str,
-) -> Result<bool, String> {
-    println!("[updater] checking {} jobs: {}", label, jobs.len());
-    emit_progress(app_handle, format!("正在检查{}", label));
-
-    let mut pending_jobs = Vec::new();
-    for job in jobs {
-        if download_job_needed(&job).await {
-            println!(
-                "[updater] {} pending: {} <- {}",
-                label,
-                job.dest.display(),
-                job.urls.join(" | ")
-            );
-            pending_jobs.push(job);
-        } else {
-            println!("[updater] {} exists: {}", label, job.dest.display());
-        }
-    }
-
-    let jobs = pending_jobs;
-    if jobs.is_empty() {
-        emit_progress(app_handle, format!("{}已完整", label));
-        println!("[updater] {} complete, no downloads needed", label);
-        return Ok(false);
-    }
-
-    let total = jobs.len();
-    let counter = Arc::new(AtomicUsize::new(0));
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(8));
-    let client = client.clone();
-    let downloaded_bytes = Arc::new(AtomicUsize::new(0));
-    let speed_monitor_stop = Arc::new(AtomicBool::new(false));
-    let speed_monitor = tokio::spawn(monitor_download_speed(
-        app_handle.clone(),
-        downloaded_bytes.clone(),
-        speed_monitor_stop.clone(),
-        false,
-    ));
-
-    let fetches = futures::stream::iter(jobs.into_iter().map(|job| {
-        let client = client.clone();
-        let app_handle = app_handle.clone();
-        let counter = counter.clone();
-        let semaphore = semaphore.clone();
-        let label = label.to_string();
-        let downloaded_bytes = downloaded_bytes.clone();
-
-        async move {
-            let _permit = semaphore.acquire().await.map_err(|e| e.to_string())?;
-            ensure_download_from_urls_with_progress(
-                &client,
-                &job.urls,
-                &job.dest,
-                job.sha1.as_deref(),
-                Some(&downloaded_bytes),
-            )
-            .await?;
-            let current = counter.fetch_add(1, Ordering::SeqCst) + 1;
-            let _ = app_handle.emit(
-                "download-progress",
-                ProgressPayload {
-                    current,
-                    total,
-                    file: label,
-                },
-            );
-            Ok::<(), String>(())
-        }
-    }))
-    .buffer_unordered(8);
-
-    let results: Vec<_> = fetches.collect().await;
-    speed_monitor_stop.store(true, Ordering::SeqCst);
-    let _ = speed_monitor.await;
-    for result in results {
-        result?;
-    }
-
-    println!("[updater] {} downloaded {} files", label, total);
-    Ok(true)
-}
-
-async fn download_job_needed(job: &DownloadJob) -> bool {
-    if !job.dest.exists() {
-        return true;
-    }
-
-    match job.sha1.as_deref() {
-        Some(expected_hash) => calculate_sha1(&job.dest)
-            .await
-            .map_or(true, |actual_hash| actual_hash != expected_hash),
-        None => false,
-    }
 }
 
 async fn ensure_mod_loader_installer_outputs(
@@ -866,15 +749,8 @@ async fn ensure_mod_loader_installer_outputs(
             .file_name()
             .ok_or("安装器文件名无效")?,
     );
-    let urls = vec![
-        format!("{}/maven/{}", BMCLAPI_BASE_URL, installer.artifact_path),
-        format!(
-            "{}/{}",
-            installer.official_base_url.trim_end_matches('/'),
-            installer.artifact_path
-        ),
-    ];
-    ensure_download_from_urls(client, &urls, &installer_path, None).await?;
+    let urls = library_urls(&installer.artifact_path);
+    download_engine::ensure_download(client, &urls, &installer_path, None, None, None).await?;
     if matches!(installer.kind, ModLoaderKind::NeoForge) {
         let profile =
             ensure_installer_libraries(client, app_handle, mc_dir, &installer_path, &installer)
@@ -987,7 +863,7 @@ async fn ensure_installer_libraries(
         jobs.len()
     );
     if !jobs.is_empty() {
-        let _ = run_download_jobs(client, app_handle, jobs, "NeoForge libraries").await?;
+        let _ = download_engine::run_jobs(client, app_handle, jobs, "NeoForge libraries").await?;
     }
 
     profile.ok_or_else(|| "NeoForge installer 缺少 install_profile.json".to_string())
@@ -1029,18 +905,7 @@ fn add_installer_library_job(
         return;
     }
 
-    let mut urls = vec![format!(
-        "{}/maven/{}",
-        BMCLAPI_BASE_URL,
-        path.replace('\\', "/")
-    )];
-
-    if let Some(url) = artifact.and_then(|artifact| artifact.url.as_ref()) {
-        append_url(&mut urls, url);
-    }
-    if let Some(base_url) = &library.url {
-        append_base_url(&mut urls, base_url, &path);
-    }
+    let urls = library_urls(&path);
 
     println!(
         "[updater] NeoForge installer library job: {} -> {}",
@@ -1052,6 +917,8 @@ fn add_installer_library_job(
         urls,
         dest,
         sha1: artifact.and_then(|artifact| artifact.sha1.clone()),
+        size: artifact.and_then(|artifact| artifact.size),
+        check_hash: true,
     });
 }
 
@@ -1414,7 +1281,6 @@ fn detect_mod_loader_installer(version_meta: &MinecraftVersionMeta) -> Option<Mo
                     "net/neoforged/neoforge/{0}/neoforge-{0}-installer.jar",
                     version
                 ),
-                official_base_url: "https://maven.neoforged.net/releases",
                 version,
             });
         }
@@ -1434,7 +1300,6 @@ fn detect_mod_loader_installer(version_meta: &MinecraftVersionMeta) -> Option<Mo
                     "net/minecraftforge/forge/{0}/forge-{0}-installer.jar",
                     version
                 ),
-                official_base_url: "https://maven.minecraftforge.net",
                 version,
             });
         }
@@ -1466,7 +1331,6 @@ fn detect_mod_loader_from_fml_args(
                 "net/neoforged/neoforge/{0}/neoforge-{0}-installer.jar",
                 version
             ),
-            official_base_url: "https://maven.neoforged.net/releases",
             version,
         });
     }
@@ -1480,7 +1344,6 @@ fn detect_mod_loader_from_fml_args(
                     "net/minecraftforge/forge/{0}/forge-{0}-installer.jar",
                     version
                 ),
-                official_base_url: "https://maven.minecraftforge.net",
                 version,
             });
         }
@@ -1747,17 +1610,7 @@ async fn ensure_libraries(
             .and_then(|artifact| artifact.path.clone())
             .or_else(|| library.name.as_deref().and_then(library_path_from_name))
         {
-            let mut urls = vec![format!(
-                "{}/maven/{}",
-                BMCLAPI_BASE_URL,
-                path.replace('\\', "/")
-            )];
-            if let Some(url) = artifact.and_then(|artifact| artifact.url.as_ref()) {
-                append_url(&mut urls, url);
-            }
-            if let Some(base_url) = &library.url {
-                append_base_url(&mut urls, base_url, &path);
-            }
+            let urls = library_urls(&path);
             let dest = libs_dir.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
             push_download_job(
                 &mut jobs,
@@ -1766,6 +1619,8 @@ async fn ensure_libraries(
                     urls,
                     dest,
                     sha1: artifact.and_then(|artifact| artifact.sha1.clone()),
+                    size: artifact.and_then(|artifact| artifact.size),
+                    check_hash: true,
                 },
             );
         }
@@ -1784,17 +1639,7 @@ async fn ensure_libraries(
         };
 
         if let Some(path) = &native_artifact.path {
-            let mut urls = vec![format!(
-                "{}/maven/{}",
-                BMCLAPI_BASE_URL,
-                path.replace('\\', "/")
-            )];
-            if let Some(url) = &native_artifact.url {
-                append_url(&mut urls, url);
-            }
-            if let Some(base_url) = &library.url {
-                append_base_url(&mut urls, base_url, path);
-            }
+            let urls = library_urls(path);
             let dest = libs_dir.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
             push_download_job(
                 &mut jobs,
@@ -1803,6 +1648,8 @@ async fn ensure_libraries(
                     urls,
                     dest: dest.clone(),
                     sha1: native_artifact.sha1.clone(),
+                    size: native_artifact.size,
+                    check_hash: true,
                 },
             );
             native_extracts.push(dest);
@@ -1810,7 +1657,7 @@ async fn ensure_libraries(
     }
 
     println!("[updater] Minecraft libraries collected: {}", jobs.len());
-    let downloaded = run_download_jobs(client, app_handle, jobs, "Minecraft libraries").await?;
+    let downloaded = download_engine::run_jobs(client, app_handle, jobs, "Minecraft libraries").await?;
 
     for jar_path in native_extracts {
         extract_native_jar(&jar_path, &natives_dir)?;
@@ -1829,29 +1676,93 @@ fn push_download_job(
     }
 }
 
-async fn asset_index_exists(
-    mc_dir: &Path,
-    version_meta: &MinecraftVersionMeta,
-) -> Result<bool, String> {
-    let Some(asset_index) = &version_meta.asset_index else {
-        return Ok(false);
-    };
-
-    let index_path = mc_dir
-        .join("assets")
-        .join("indexes")
-        .join(format!("{}.json", asset_index.id));
-    if !index_path.exists() {
-        return Ok(false);
+async fn load_local_asset_index(
+    index_path: &Path,
+    asset_index: &AssetIndexInfo,
+    check_hash: bool,
+) -> Option<AssetIndexJson> {
+    let metadata = fs::metadata(index_path).await.ok()?;
+    if asset_index
+        .size
+        .is_some_and(|expected_size| expected_size > 0 && metadata.len() != expected_size)
+    {
+        println!(
+            "[updater] assets index size mismatch: {}",
+            index_path.display()
+        );
+        return None;
     }
 
-    Ok(true)
+    if check_hash {
+        if let Some(expected_hash) = asset_index.sha1.as_deref() {
+            let actual_hash = download_engine::calculate_sha1(index_path).await.ok()?;
+            if actual_hash != expected_hash {
+                println!(
+                    "[updater] assets index SHA-1 mismatch: {}",
+                    index_path.display()
+                );
+                return None;
+            }
+        }
+    }
+
+    let raw_index = fs::read_to_string(index_path).await.ok()?;
+    serde_json::from_str(&raw_index).ok()
+}
+
+async fn download_asset_index(
+    client: &Client,
+    index_path: &Path,
+    tmp_index_path: &Path,
+    asset_index: &AssetIndexInfo,
+) -> Result<(AssetIndexJson, AssetIndexUpdate), String> {
+    let source_index_url = asset_index
+        .url
+        .as_ref()
+        .ok_or_else(|| format!("版本 JSON 缺少 assetIndex.url: {}", asset_index.id))?;
+    let index_urls = vec![asset_index_url(source_index_url)?];
+    download_engine::ensure_download(
+        client,
+        &index_urls,
+        tmp_index_path,
+        asset_index.sha1.as_deref(),
+        asset_index.size.filter(|size| *size > 0),
+        None,
+    )
+    .await?;
+
+    let raw_index = fs::read_to_string(tmp_index_path)
+        .await
+        .map_err(|error| format!("读取 assets index 失败: {}", error))?;
+    let parsed_index = serde_json::from_str(&raw_index)
+        .map_err(|error| format!("解析 assets index 失败: {}", error))?;
+
+    let backup_index_path = if index_path.exists() {
+        let backup_index_path = index_path.with_extension("json.bak");
+        let _ = fs::remove_file(&backup_index_path).await;
+        fs::copy(index_path, &backup_index_path)
+            .await
+            .map_err(|error| format!("备份旧 assets index 失败: {}", error))?;
+        Some(backup_index_path)
+    } else {
+        None
+    };
+
+    Ok((
+        parsed_index,
+        AssetIndexUpdate {
+            index_path: index_path.to_path_buf(),
+            tmp_index_path: tmp_index_path.to_path_buf(),
+            backup_index_path,
+        },
+    ))
 }
 
 async fn prepare_assets(
     client: &Client,
     mc_dir: &Path,
     version_meta: &MinecraftVersionMeta,
+    check_assets_hash: bool,
 ) -> Result<Option<PreparedAssets>, String> {
     let Some(asset_index) = &version_meta.asset_index else {
         return Ok(None);
@@ -1861,34 +1772,21 @@ async fn prepare_assets(
     let objects_dir = mc_dir.join("assets").join("objects");
     let index_path = indexes_dir.join(format!("{}.json", asset_index.id));
     let tmp_index_path = index_path.with_extension("json.download");
-    let backup_index_path = if index_path.exists() {
-        let backup_index_path = index_path.with_extension("json.bak");
-        let _ = fs::remove_file(&backup_index_path).await;
-        fs::rename(&index_path, &backup_index_path)
-            .await
-            .map_err(|e| format!("重命名旧 assets index 失败: {}", e))?;
-        Some(backup_index_path)
-    } else {
-        None
-    };
 
-    let index_url = asset_index
-        .url
-        .as_ref()
-        .ok_or_else(|| format!("版本 JSON 缺少 assetIndex.url: {}", asset_index.id))?;
-    ensure_download_from_urls(
-        client,
-        &[index_url.clone()],
-        &tmp_index_path,
-        asset_index.sha1.as_deref(),
-    )
-    .await?;
-
-    let raw_index = fs::read_to_string(&tmp_index_path)
-        .await
-        .map_err(|e| format!("读取 assets index 失败: {}", e))?;
-    let asset_index_json: AssetIndexJson =
-        serde_json::from_str(&raw_index).map_err(|e| format!("解析 assets index 失败: {}", e))?;
+    let (asset_index_json, index_update) =
+        if let Some(local_index) =
+            load_local_asset_index(&index_path, asset_index, check_assets_hash).await
+        {
+            println!(
+                "[updater] reusing local assets index: {}",
+                index_path.display()
+            );
+            (local_index, None)
+        } else {
+            let (downloaded_index, update) =
+                download_asset_index(client, &index_path, &tmp_index_path, asset_index).await?;
+            (downloaded_index, Some(update))
+        };
 
     let mut jobs = Vec::new();
     for (name, object) in asset_index_json.objects {
@@ -1897,47 +1795,42 @@ async fn prepare_assets(
             .get(0..2)
             .ok_or_else(|| format!("资源 {} 的 hash 无效", name))?;
         let rel_path = format!("{}/{}", prefix, object.hash);
-        let urls = vec![
-            format!("{}/assets/{}", BMCLAPI_BASE_URL, rel_path),
-            format!("https://resources.download.minecraft.net/{}", rel_path),
-        ];
+        let urls = vec![asset_object_url(&rel_path)];
         let dest = objects_dir.join(prefix).join(&object.hash);
         jobs.push(DownloadJob {
             urls,
             dest,
             sha1: Some(object.hash),
+            size: (object.size > 0).then_some(object.size),
+            check_hash: check_assets_hash,
         });
     }
 
-    Ok(Some(PreparedAssets {
+    Ok(Some(PreparedAssets { index_update, jobs }))
+}
+
+async fn finish_assets_index(update: AssetIndexUpdate) -> Result<(), String> {
+    let AssetIndexUpdate {
         index_path,
         tmp_index_path,
         backup_index_path,
-        jobs,
-    }))
-}
+    } = update;
 
-async fn finish_assets_index(
-    index_path: PathBuf,
-    tmp_index_path: PathBuf,
-    backup_index_path: Option<PathBuf>,
-) -> Result<(), String> {
     if let Some(backup_index_path) = backup_index_path {
-        if let Err(e) = fs::rename(&tmp_index_path, &index_path).await {
+        let _ = fs::remove_file(&index_path).await;
+        if let Err(error) = fs::rename(&tmp_index_path, &index_path).await {
             let _ = fs::rename(&backup_index_path, &index_path).await;
-            return Err(format!("保存 assets index 失败: {}", e));
+            return Err(format!("保存 assets index 失败: {}", error));
         }
-
         let _ = fs::remove_file(backup_index_path).await;
     } else {
         fs::rename(&tmp_index_path, &index_path)
             .await
-            .map_err(|e| format!("保存 assets index 失败: {}", e))?;
+            .map_err(|error| format!("保存 assets index 失败: {}", error))?;
     }
 
     Ok(())
 }
-
 fn is_library_allowed(rules: Option<&[MinecraftRule]>) -> bool {
     let Some(rules) = rules else {
         return true;
@@ -2002,24 +1895,6 @@ fn library_path_from_name(name: &str) -> Option<String> {
     Some(format!("{}/{}/{}/{}", group, artifact, version, file_name))
 }
 
-fn append_url(urls: &mut Vec<String>, url: &str) {
-    if !url.trim().is_empty() {
-        urls.push(url.to_string());
-    }
-}
-
-fn append_base_url(urls: &mut Vec<String>, base_url: &str, path: &str) {
-    if base_url.trim().is_empty() {
-        return;
-    }
-
-    urls.push(format!(
-        "{}/{}",
-        base_url.trim_end_matches('/'),
-        path.replace('\\', "/")
-    ));
-}
-
 fn extract_native_jar(jar_path: &Path, natives_dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(natives_dir).map_err(|e| e.to_string())?;
 
@@ -2079,484 +1954,6 @@ async fn ensure_pack_source_current(
     Ok(())
 }
 
-fn part_tmp_path(tmp_path: &Path, index: usize) -> PathBuf {
-    let mut part_path = tmp_path.as_os_str().to_os_string();
-    part_path.push(format!(".part{}", index));
-    PathBuf::from(part_path)
-}
-
-fn parallel_part_count(total_size: u64) -> usize {
-    if total_size < SINGLE_FILE_PARALLEL_THRESHOLD_BYTES {
-        return 1;
-    }
-
-    let by_chunk = (total_size.div_ceil(SINGLE_FILE_PARALLEL_CHUNK_BYTES))
-        .min(SINGLE_FILE_PARALLEL_PARTS as u64);
-    by_chunk.max(2) as usize
-}
-
-fn split_download_ranges(total_size: u64, part_count: usize) -> Vec<(usize, u64, u64)> {
-    if total_size == 0 || part_count == 0 {
-        return Vec::new();
-    }
-
-    let part_size = total_size.div_ceil(part_count as u64);
-    let mut ranges = Vec::with_capacity(part_count);
-    let mut start = 0u64;
-
-    for index in 0..part_count {
-        if start >= total_size {
-            break;
-        }
-
-        let end = (start + part_size - 1).min(total_size - 1);
-        ranges.push((index, start, end));
-        start = end + 1;
-    }
-
-    ranges
-}
-
-fn parse_content_range_total(response: &reqwest::Response) -> Option<u64> {
-    let content_range = response.headers().get(CONTENT_RANGE)?.to_str().ok()?.trim();
-    let (_, total) = content_range.rsplit_once('/')?;
-    if total == "*" {
-        return None;
-    }
-
-    total.parse::<u64>().ok()
-}
-
-async fn probe_parallel_download_size(client: &Client, url: &str) -> Option<u64> {
-    let response = client
-        .get(url)
-        .header(RANGE, "bytes=0-0")
-        .send()
-        .await
-        .ok()?;
-
-    if response.status() != StatusCode::PARTIAL_CONTENT {
-        return None;
-    }
-
-    parse_content_range_total(&response).filter(|size| *size > 0)
-}
-
-async fn probe_pack_parallel_download_size(
-    client: &Client,
-    url: &str,
-    source_generation: usize,
-    tmp_path: &Path,
-) -> Result<Option<u64>, String> {
-    ensure_pack_source_current(source_generation, tmp_path).await?;
-
-    let source_switched = PACK_SOURCE_SWITCH_NOTIFY.notified();
-    tokio::pin!(source_switched);
-    ensure_pack_source_current(source_generation, tmp_path).await?;
-
-    let response = tokio::select! {
-        _ = &mut source_switched => {
-            let _ = fs::remove_file(tmp_path).await;
-            return Err(pack_source_switch_error());
-        }
-        result = client.get(url).header(RANGE, "bytes=0-0").send() => match result {
-            Ok(response) => response,
-            Err(_) => return Ok(None),
-        },
-    };
-
-    ensure_pack_source_current(source_generation, tmp_path).await?;
-
-    if response.status() != StatusCode::PARTIAL_CONTENT {
-        return Ok(None);
-    }
-
-    Ok(parse_content_range_total(&response).filter(|size| *size > 0))
-}
-
-async fn cleanup_parallel_temp_files(tmp_path: &Path, part_count: usize) {
-    let _ = fs::remove_file(tmp_path).await;
-    for index in 0..part_count {
-        let _ = fs::remove_file(part_tmp_path(tmp_path, index)).await;
-    }
-}
-
-async fn cleanup_part_files(part_paths: &[PathBuf]) {
-    for part_path in part_paths {
-        let _ = fs::remove_file(part_path).await;
-    }
-}
-
-async fn merge_download_parts(
-    tmp_path: &Path,
-    dest: &Path,
-    url: &str,
-    part_paths: &[PathBuf],
-    expected_hash: Option<&str>,
-) -> Result<(), String> {
-    let result = async {
-        let mut output = File::create(tmp_path).await.map_err(|e| e.to_string())?;
-        let mut hasher = Sha1::new();
-        let mut buffer = [0u8; 64 * 1024];
-
-        for part_path in part_paths {
-            let mut part = File::open(part_path).await.map_err(|e| e.to_string())?;
-            loop {
-                let n = part.read(&mut buffer).await.map_err(|e| e.to_string())?;
-                if n == 0 {
-                    break;
-                }
-
-                hasher.update(&buffer[..n]);
-                output
-                    .write_all(&buffer[..n])
-                    .await
-                    .map_err(|e| e.to_string())?;
-            }
-        }
-
-        output.flush().await.map_err(|e| e.to_string())?;
-        drop(output);
-
-        let actual_hash = hex::encode(hasher.finalize());
-        if expected_hash.is_some_and(|hash| actual_hash != hash) {
-            return Err(format!("{} -> Hash 校验失败，文件可能损坏", url));
-        }
-
-        fs::rename(tmp_path, dest)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok::<(), String>(())
-    }
-    .await;
-
-    cleanup_part_files(part_paths).await;
-    if result.is_err() {
-        let _ = fs::remove_file(tmp_path).await;
-    }
-
-    result
-}
-
-async fn download_range_part(
-    client: Client,
-    url: String,
-    part_path: PathBuf,
-    index: usize,
-    start: u64,
-    end: u64,
-    downloaded_bytes: Option<Arc<AtomicUsize>>,
-) -> Result<(usize, PathBuf), String> {
-    let result = async {
-        let response = client
-            .get(&url)
-            .header(RANGE, format!("bytes={}-{}", start, end))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if response.status() != StatusCode::PARTIAL_CONTENT {
-            return Err(format!(
-                "{} -> HTTP {} for range {}-{}",
-                url,
-                response.status(),
-                start,
-                end
-            ));
-        }
-
-        let mut file = File::create(&part_path).await.map_err(|e| e.to_string())?;
-        let mut stream = response.bytes_stream();
-        let expected_len = end - start + 1;
-        let mut written = 0u64;
-
-        while let Some(item) = stream.next().await {
-            let chunk = item.map_err(|e| e.to_string())?;
-            file.write_all(&chunk).await.map_err(|e| e.to_string())?;
-            written += chunk.len() as u64;
-            if let Some(downloaded_bytes) = &downloaded_bytes {
-                downloaded_bytes.fetch_add(chunk.len(), Ordering::SeqCst);
-            }
-        }
-
-        file.flush().await.map_err(|e| e.to_string())?;
-        drop(file);
-
-        if written != expected_len {
-            return Err(format!(
-                "{} -> Range {}-{} 大小不匹配，期望 {} bytes，实际 {} bytes",
-                url, start, end, expected_len, written
-            ));
-        }
-
-        Ok::<(), String>(())
-    }
-    .await;
-
-    if let Err(error) = result {
-        let _ = fs::remove_file(&part_path).await;
-        return Err(error);
-    }
-
-    Ok((index, part_path))
-}
-
-async fn download_pack_range_part(
-    client: Client,
-    url: String,
-    part_path: PathBuf,
-    index: usize,
-    start: u64,
-    end: u64,
-    source_generation: usize,
-    downloaded_bytes: Arc<AtomicUsize>,
-) -> Result<(usize, PathBuf), String> {
-    let result = async {
-        ensure_pack_source_current(source_generation, &part_path).await?;
-
-        let source_switched = PACK_SOURCE_SWITCH_NOTIFY.notified();
-        tokio::pin!(source_switched);
-        ensure_pack_source_current(source_generation, &part_path).await?;
-
-        let response = tokio::select! {
-            _ = &mut source_switched => {
-                let _ = fs::remove_file(&part_path).await;
-                return Err(pack_source_switch_error());
-            }
-            result = client.get(&url).header(RANGE, format!("bytes={}-{}", start, end)).send() => {
-                result.map_err(|e| e.to_string())?
-            }
-        };
-
-        if response.status() != StatusCode::PARTIAL_CONTENT {
-            return Err(format!(
-                "{} -> HTTP {} for range {}-{}",
-                url,
-                response.status(),
-                start,
-                end
-            ));
-        }
-
-        let mut file = File::create(&part_path).await.map_err(|e| e.to_string())?;
-        let mut stream = response.bytes_stream();
-        let expected_len = end - start + 1;
-        let mut written = 0u64;
-
-        loop {
-            ensure_pack_source_current(source_generation, &part_path).await?;
-
-            let Some(item) = (tokio::select! {
-                _ = &mut source_switched => {
-                    let _ = fs::remove_file(&part_path).await;
-                    return Err(pack_source_switch_error());
-                }
-                item = stream.next() => item,
-            }) else {
-                break;
-            };
-
-            let chunk = item.map_err(|e| e.to_string())?;
-            file.write_all(&chunk).await.map_err(|e| e.to_string())?;
-            written += chunk.len() as u64;
-            downloaded_bytes.fetch_add(chunk.len(), Ordering::SeqCst);
-        }
-
-        file.flush().await.map_err(|e| e.to_string())?;
-        drop(file);
-
-        if written != expected_len {
-            return Err(format!(
-                "{} -> Range {}-{} 大小不匹配，期望 {} bytes，实际 {} bytes",
-                url, start, end, expected_len, written
-            ));
-        }
-
-        Ok::<(), String>(())
-    }
-    .await;
-
-    if let Err(error) = result {
-        let _ = fs::remove_file(&part_path).await;
-        return Err(error);
-    }
-
-    Ok((index, part_path))
-}
-
-async fn collect_downloaded_parts(
-    results: Vec<Result<(usize, PathBuf), String>>,
-    part_count: usize,
-    tmp_path: &Path,
-) -> Result<Vec<PathBuf>, String> {
-    let mut part_paths = vec![None; part_count];
-    let mut first_error = None;
-
-    for result in results {
-        match result {
-            Ok((index, part_path)) if index < part_count => {
-                part_paths[index] = Some(part_path);
-            }
-            Ok((index, part_path)) => {
-                let _ = fs::remove_file(part_path).await;
-                if first_error.is_none() {
-                    first_error = Some(format!("分片索引越界: {}", index));
-                }
-            }
-            Err(error) => {
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
-            }
-        }
-    }
-
-    if let Some(error) = first_error {
-        cleanup_parallel_temp_files(tmp_path, part_count).await;
-        return Err(error);
-    }
-
-    match part_paths.into_iter().collect::<Option<Vec<_>>>() {
-        Some(part_paths) => Ok(part_paths),
-        None => {
-            cleanup_parallel_temp_files(tmp_path, part_count).await;
-            Err("分片下载结果不完整".to_string())
-        }
-    }
-}
-
-async fn download_file_parallel(
-    client: &Client,
-    url: &str,
-    dest: &Path,
-    tmp_path: &Path,
-    total_size: u64,
-    expected_hash: Option<&str>,
-    downloaded_bytes: Option<Arc<AtomicUsize>>,
-) -> Result<(), String> {
-    let part_count = parallel_part_count(total_size);
-    if part_count <= 1 {
-        return Err("文件小于分片下载阈值".to_string());
-    }
-
-    let ranges = split_download_ranges(total_size, part_count);
-    let part_count = ranges.len();
-    cleanup_parallel_temp_files(tmp_path, part_count).await;
-
-    let client = client.clone();
-    let url = url.to_string();
-    let fetches = futures::stream::iter(ranges.into_iter().map(|(index, start, end)| {
-        let client = client.clone();
-        let url = url.clone();
-        let part_path = part_tmp_path(tmp_path, index);
-        let downloaded_bytes = downloaded_bytes.clone();
-
-        async move {
-            download_range_part(client, url, part_path, index, start, end, downloaded_bytes).await
-        }
-    }))
-    .buffer_unordered(part_count);
-
-    let results: Vec<_> = fetches.collect().await;
-    let part_paths = collect_downloaded_parts(results, part_count, tmp_path).await?;
-    merge_download_parts(tmp_path, dest, &url, &part_paths, expected_hash).await
-}
-
-async fn download_pack_file_parallel(
-    client: &Client,
-    url: &str,
-    dest: &Path,
-    tmp_path: &Path,
-    total_size: u64,
-    expected_hash: Option<&str>,
-    source_generation: usize,
-    downloaded_bytes: &Arc<AtomicUsize>,
-) -> Result<(), String> {
-    let part_count = parallel_part_count(total_size);
-    if part_count <= 1 {
-        return Err("文件小于分片下载阈值".to_string());
-    }
-
-    let ranges = split_download_ranges(total_size, part_count);
-    let part_count = ranges.len();
-    cleanup_parallel_temp_files(tmp_path, part_count).await;
-    ensure_pack_source_current(source_generation, tmp_path).await?;
-
-    let client = client.clone();
-    let url = url.to_string();
-    let downloaded_bytes = downloaded_bytes.clone();
-    let fetches = futures::stream::iter(ranges.into_iter().map(|(index, start, end)| {
-        let client = client.clone();
-        let url = url.clone();
-        let part_path = part_tmp_path(tmp_path, index);
-        let downloaded_bytes = downloaded_bytes.clone();
-
-        async move {
-            download_pack_range_part(
-                client,
-                url,
-                part_path,
-                index,
-                start,
-                end,
-                source_generation,
-                downloaded_bytes,
-            )
-            .await
-        }
-    }))
-    .buffer_unordered(part_count);
-
-    let results: Vec<_> = fetches.collect().await;
-    let part_paths = collect_downloaded_parts(results, part_count, tmp_path).await?;
-    if let Err(error) = ensure_pack_source_current(source_generation, tmp_path).await {
-        cleanup_part_files(&part_paths).await;
-        return Err(error);
-    }
-    merge_download_parts(tmp_path, dest, &url, &part_paths, expected_hash).await
-}
-
-async fn download_file_single_stream(
-    client: &Client,
-    url: &str,
-    dest: &Path,
-    tmp_path: &Path,
-    expected_hash: Option<&str>,
-    downloaded_bytes: Option<&Arc<AtomicUsize>>,
-) -> Result<(), String> {
-    let response = client.get(url).send().await.map_err(|e| e.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("{} -> HTTP {}", url, response.status()));
-    }
-
-    let mut file = File::create(tmp_path).await.map_err(|e| e.to_string())?;
-    let mut hasher = Sha1::new();
-    let mut stream = response.bytes_stream();
-
-    while let Some(item) = stream.next().await {
-        let chunk = item.map_err(|e| e.to_string())?;
-        hasher.update(&chunk);
-        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
-        if let Some(downloaded_bytes) = downloaded_bytes {
-            downloaded_bytes.fetch_add(chunk.len(), Ordering::SeqCst);
-        }
-    }
-
-    file.flush().await.map_err(|e| e.to_string())?;
-    drop(file);
-
-    let actual_hash = hex::encode(hasher.finalize());
-    if expected_hash.is_some_and(|hash| actual_hash != hash) {
-        let _ = fs::remove_file(tmp_path).await;
-        return Err(format!("{} -> Hash 校验失败，文件可能损坏", url));
-    }
-
-    fs::rename(tmp_path, dest)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 async fn download_pack_file_single_stream(
     client: &Client,
     url: &str,
@@ -2565,9 +1962,14 @@ async fn download_pack_file_single_stream(
     expected_hash: Option<&str>,
     source_generation: usize,
     downloaded_bytes: &Arc<AtomicUsize>,
+    request_semaphore: &Arc<tokio::sync::Semaphore>,
 ) -> Result<(), String> {
     ensure_pack_source_current(source_generation, tmp_path).await?;
 
+    let _permit = request_semaphore
+        .acquire()
+        .await
+        .map_err(|e| e.to_string())?;
     let source_switched = PACK_SOURCE_SWITCH_NOTIFY.notified();
     tokio::pin!(source_switched);
     ensure_pack_source_current(source_generation, tmp_path).await?;
@@ -2621,63 +2023,15 @@ async fn download_pack_file_single_stream(
     Ok(())
 }
 
-async fn download_file_streamed(
-    client: &Client,
-    url: &str,
-    dest: &Path,
-    expected_hash: Option<&str>,
-    downloaded_bytes: Option<&Arc<AtomicUsize>>,
-) -> Result<(), String> {
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-
-    let tmp_path = dest.with_extension("tmp");
-    if let Some(total_size) = probe_parallel_download_size(client, url).await {
-        if parallel_part_count(total_size) > 1 {
-            match download_file_parallel(
-                client,
-                url,
-                dest,
-                &tmp_path,
-                total_size,
-                expected_hash,
-                downloaded_bytes.cloned(),
-            )
-            .await
-            {
-                Ok(()) => return Ok(()),
-                Err(error) => {
-                    println!(
-                        "[updater] single-file parallel download fallback: {} ({})",
-                        dest.display(),
-                        error
-                    );
-                }
-            }
-        }
-    }
-
-    download_file_single_stream(
-        client,
-        url,
-        dest,
-        &tmp_path,
-        expected_hash,
-        downloaded_bytes,
-    )
-    .await
-}
-
 async fn download_pack_file_streamed(
     client: &Client,
     url: &str,
     dest: &Path,
     expected_hash: Option<&str>,
+    expected_size: u64,
     source_generation: usize,
     downloaded_bytes: &Arc<AtomicUsize>,
+    request_semaphore: &Arc<tokio::sync::Semaphore>,
 ) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)
@@ -2686,36 +2040,8 @@ async fn download_pack_file_streamed(
     }
 
     let tmp_path = dest.with_extension("tmp");
-    ensure_pack_source_current(source_generation, &tmp_path).await?;
-
-    if let Some(total_size) =
-        probe_pack_parallel_download_size(client, url, source_generation, &tmp_path).await?
-    {
-        if parallel_part_count(total_size) > 1 {
-            match download_pack_file_parallel(
-                client,
-                url,
-                dest,
-                &tmp_path,
-                total_size,
-                expected_hash,
-                source_generation,
-                downloaded_bytes,
-            )
-            .await
-            {
-                Ok(()) => return Ok(()),
-                Err(error) if is_pack_source_switch_error(&error) => return Err(error),
-                Err(error) => {
-                    println!(
-                        "[updater] pack parallel download fallback: {} ({})",
-                        dest.display(),
-                        error
-                    );
-                }
-            }
-        }
-    }
+    // 整合包文件保持单连接顺序下载；分段仅用于 Minecraft 官方资源和库文件。
+    let _ = expected_size;
 
     download_pack_file_single_stream(
         client,
@@ -2725,22 +2051,9 @@ async fn download_pack_file_streamed(
         expected_hash,
         source_generation,
         downloaded_bytes,
+        request_semaphore,
     )
     .await
-}
-
-async fn calculate_sha1(path: &Path) -> tokio::io::Result<String> {
-    let mut file = File::open(path).await?;
-    let mut hasher = Sha1::new();
-    let mut buffer = [0u8; 8192];
-    loop {
-        let n = file.read(&mut buffer).await?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buffer[..n]);
-    }
-    Ok(hex::encode(hasher.finalize()))
 }
 
 async fn cleanup_unused_mods(base_dir: &Path, version: &str, remote: &Manifest) {
@@ -2768,6 +2081,46 @@ async fn cleanup_unused_mods(base_dir: &Path, version: &str, remote: &Manifest) 
                     let _ = fs::remove_file(entry.path()).await;
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_user_managed_pack_path;
+
+    #[test]
+    fn user_managed_pack_paths_are_skipped() {
+        for path in [
+            "config",
+            "config/sodium-options.json",
+            ".minecraft/config/mod.toml",
+            "minecraft\\config\\mod.toml",
+            "CONFIG/mod.toml",
+            "options.txt",
+            ".minecraft/options.txt",
+            "minecraft\\OPTIONS.TXT",
+        ] {
+            assert!(
+                is_user_managed_pack_path(path),
+                "expected user-managed path: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn similarly_named_pack_paths_are_not_skipped() {
+        for path in [
+            "config.json",
+            "configs/mod.toml",
+            "mods/config/mod.toml",
+            "profiles/options.txt",
+            "options.txt.bak",
+        ] {
+            assert!(
+                !is_user_managed_pack_path(path),
+                "expected managed pack path: {path}"
+            );
         }
     }
 }

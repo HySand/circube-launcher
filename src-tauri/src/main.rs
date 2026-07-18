@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod auth;
+mod download_engine;
+mod download_sources;
 mod launcher;
 mod models;
 mod updater;
@@ -49,10 +51,16 @@ fn logout_current_user(state: tauri::State<'_, Mutex<AuthState>>) -> bool {
 
 fn main() {
     let client = Client::builder()
+        // BMCLAPI is a redirecting scheduler.  Like PCL, the launcher must
+        // follow the selected OpenBMCLAPI node instead of treating 302 as an
+        // error; failed nodes are retried through the BMCLAPI entry point.
+        .redirect(reqwest::redirect::Policy::limited(50))
         .timeout(Duration::from_secs(300))
         .connect_timeout(Duration::from_secs(10))
         .pool_idle_timeout(Duration::from_secs(90))
-        .pool_max_idle_per_host(32)
+        .pool_max_idle_per_host(64)
+        .tcp_nodelay(true)
+        .http2_adaptive_window(true)
         .user_agent("CirCubeLauncher/2.0 (Windows NT 10.0; Win64; x64) reqwest/0.12")
         .build()
         .expect("Failed to create reqwest::Client");

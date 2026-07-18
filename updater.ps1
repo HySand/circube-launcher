@@ -148,30 +148,16 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText($outputFile, $json, $utf8NoBom)
 
 Write-Section ("Success manifest generated: " + $outputFile)
-Write-Host "System packing updater..."
-
-if (Test-Path -LiteralPath $zipFile -PathType Leaf) {
-    Write-Host "Deleting existing archive: $zipFile"
-    Remove-Item -LiteralPath $zipFile -Force
-}
-
-$sevenZip = Get-RequiredCommand -Name "7z" -PreferredPath "C:\Program Files\7-Zip\7z.exe"
-Invoke-Native `
-    -FilePath $sevenZip `
-    -Arguments @("a", "-t7z", "-mx9", "-m0=lzma2", "-md=1024m", "-mfb=273", "-ms=on", "-mtc=on", $zipFile, "./public/updater/*") `
-    -ErrorMessage "7-Zip failed"
-
-Write-Host ("Success archive generated: " + $zipFile)
 
 $rclone = Get-RequiredCommand -Name "rclone" -PreferredPath (Join-Path $scriptDir "rclone.exe")
 
-Write-Section "System uploading to R2..."
+Write-Section "System uploading updater files to R2..."
 Invoke-Native `
     -FilePath $rclone `
     -Arguments @(
         "sync",
-        "./public",
-        "R2:circube/public",
+        "./public/updater",
+        "R2:circube/public/updater",
         "--local-encoding", "None",
         "--s3-encoding", "None",
         "--transfers=8",
@@ -183,6 +169,25 @@ Invoke-Native `
     -ErrorMessage "R2 sync failed"
 
 Write-Host "Success R2 sync complete"
+
+Write-Section "System uploading updater files to Bitiful..."
+Invoke-Native `
+    -FilePath $rclone `
+    -Arguments @(
+        "sync",
+        "./public/updater",
+        "bitiful:circube/public/updater",
+        "--local-encoding", "None",
+        "--s3-encoding", "None",
+        "--transfers=8",
+        "--checkers=16",
+        "--progress",
+        "--stats-one-line",
+        "--retries", "3"
+    ) `
+    -ErrorMessage "Bitiful sync failed"
+
+Write-Host "Success Bitiful sync complete"
 
 Write-Section "System updating Gitee manifest..."
 
@@ -201,5 +206,39 @@ try {
 } finally {
     Pop-Location
 }
+
+Write-Section "System packing updater..."
+
+if (Test-Path -LiteralPath $zipFile -PathType Leaf) {
+    Write-Host "Deleting existing archive: $zipFile"
+    Remove-Item -LiteralPath $zipFile -Force
+}
+
+$sevenZip = Get-RequiredCommand -Name "7z" -PreferredPath "C:\Program Files\7-Zip\7z.exe"
+Invoke-Native `
+    -FilePath $sevenZip `
+    -Arguments @("a", "-t7z", "-mx=9", "-m0=lzma2", "-md=1024m", "-mfb=273", "-myx=9", "-mqs=on", "-ms=on", "-mtc=on", $zipFile, "./public/updater/*") `
+    -ErrorMessage "7-Zip failed"
+
+Write-Host ("Success archive generated: " + $zipFile)
+
+Write-Section "System uploading archive to R2..."
+Invoke-Native `
+    -FilePath $rclone `
+    -Arguments @(
+        "copy",
+        $zipFile,
+        "R2:circube/public",
+        "--local-encoding", "None",
+        "--s3-encoding", "None",
+        "--transfers=1",
+        "--checkers=4",
+        "--progress",
+        "--stats-one-line",
+        "--retries", "3"
+    ) `
+    -ErrorMessage "R2 archive upload failed"
+
+Write-Host "Success R2 archive upload complete"
 
 Write-Host "Done"

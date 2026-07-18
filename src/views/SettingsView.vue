@@ -117,7 +117,7 @@
         <transition enter-active-class="transition duration-300 ease-out" enter-from-class="opacity-0 -translate-y-2">
           <div v-if="isManualMem" class="px-1 py-2.5">
             <Slider v-model="sliderValue" :min="512" :max="maxSafeMemory" :step="512"
-                    class="[&_[role=slider]]:bg-blue-600 [&_[role=slider]]:border-blue-600 [&_.relative_span:first-child]:bg-blue-600/20 [&_[data-orientation=horizontal]\_span:first-child]:bg-blue-600"
+                    class="[&_[role=slider]]:bg-blue-600 [&_[role=slider]]:border-blue-600 [&_.relative_span:first-child]:bg-blue-600/20 [&_[data-orientation=horizontal]_span:first-child]:bg-blue-600"
                     @update:model-value="handleSliderChange" />
           </div>
         </transition>
