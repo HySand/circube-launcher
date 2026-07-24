@@ -1,6 +1,6 @@
 use crate::auth::ensure_authenticated;
 use crate::models::*;
-use crate::utils::validate_java;
+use crate::utils::{parse_java_major_from_display, validate_java};
 use reqwest::Client;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -208,13 +208,6 @@ fn get_launcher_features(env: &HashMap<String, String>) -> HashMap<String, bool>
     );
     features.insert("has_quick_plays_support".to_string(), false);
     features
-}
-
-fn parse_java_major_from_display(display_name: &str) -> Option<u32> {
-    display_name
-        .split_whitespace()
-        .rev()
-        .find_map(|part| part.parse::<u32>().ok())
 }
 
 fn library_path_from_name(name: &str) -> Option<String> {
@@ -524,33 +517,31 @@ pub async fn launch_minecraft(
     final_args.retain(|arg| arg != "--demo");
 
     emit_progress("正在验证 JAVA...");
-    let java_path_str: String = java_path.clone();
     let required_java_major = ver_cfg
         .java_version
         .as_ref()
         .and_then(|v| v.major_version)
         .unwrap_or(21);
-    match validate_java(java_path_str) {
-        Ok(info) => {
-            let detected_java_major = parse_java_major_from_display(&info.version)
-                .ok_or_else(|| format!("无法解析 Java 主版本号: {}", info.version))?;
-            if detected_java_major < required_java_major {
-                return Err(format!(
-                    "Java 版本不符合要求：当前版本需要 Java {}，检测到 {}。",
-                    required_java_major, info.version
-                ));
-            }
-            emit_progress(&format!("Java 校验通过：{} ({})", info.version, info.path));
-        }
-        Err(err) => {
-            emit_progress(&format!("Java 验证失败：{}", err));
-            return Err(format!("Java 验证失败：{}", err));
-        }
+    let java_info = validate_java(java_path).await.map_err(|error| {
+        emit_progress(&format!("Java 验证失败：{}", error));
+        format!("Java 验证失败：{}", error)
+    })?;
+    let detected_java_major = parse_java_major_from_display(&java_info.version)
+        .ok_or_else(|| format!("无法解析 Java 主版本号: {}", java_info.version))?;
+    if detected_java_major < required_java_major {
+        return Err(format!(
+            "Java 版本不符合要求：当前版本需要 Java {}，检测到 {}。",
+            required_java_major, java_info.version
+        ));
     }
+    emit_progress(&format!(
+        "Java 校验通过：{} ({})",
+        java_info.version, java_info.path
+    ));
 
     emit_progress("正在启动 JVM...");
 
-    let mut cmd = Command::new(java_path);
+    let mut cmd = Command::new(java_info.path);
     cmd.args(&final_args).current_dir(&version_dir);
 
     #[cfg(windows)]

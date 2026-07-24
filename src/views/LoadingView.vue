@@ -186,16 +186,15 @@ onMounted(async () => {
       }
 
       if (!isJavaReady) {
-        invoke<JavaInfo[]>('scan_java_environments').then(async (list) => {
-          if (list && list.length > 0) {
-            cache.setJavaList(list);
-            const firstJava = list[0];
-            const newConfig = { ...savedConfig, javaPath: firstJava.path };
-            cache.setSettings(newConfig);
-            await invoke('save_config', { config: newConfig });
-            console.log("[Boot] Background scan completed and auto-saved.");
-          }
-        });
+        const list = await invoke<JavaInfo[]>('scan_java_environments');
+        cache.setJavaList(list);
+        if (list.length > 0) {
+          const firstJava = list[0];
+          const newConfig = { ...savedConfig, javaPath: firstJava.path };
+          cache.setSettings(newConfig);
+          await invoke('save_config', { config: newConfig });
+          console.log("[Boot] Java scan completed and auto-saved.");
+        }
       }
     };
 

@@ -373,10 +373,9 @@ onMounted(async () => {
     sliderValue.value = [config.value.maxMemory]
   }
 
-  invoke<JavaInfo[]>('scan_java_environments').then(async (list) => {
-    if (list && list.length > 0) {
-      cache.setJavaList(list);
-    }
+  invoke<JavaInfo[]>('scan_java_environments').then((list) => {
+    javaDetailList.value = list
+    cache.setJavaList(list)
   });
 
   await loadManifestVersions(false)
@@ -402,7 +401,8 @@ const handleManualImport = async () => {
     if (!selected || Array.isArray(selected)) return;
     const fileName = selected.split(/[\\/]/).pop()?.toLowerCase();
 
-    if (fileName !== targetName) {
+    const acceptedNames = isWindows ? ['java.exe', 'javaw.exe'] : [targetName]
+    if (!fileName || !acceptedNames.includes(fileName)) {
       toast.error(`该文件可能不是java`, { duration: 10000 });
       return;
     }
